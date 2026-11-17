@@ -2,13 +2,13 @@
 
 A bespoke full-stack salon platform: public beauty/hair/nail storefront, appointment booking, customer accounts, admin foundation, WebSocket live chat, and Stripe Checkout. Built independently of Shopify.
 
-**Current stage: development foundation / preview. Not production-ready.** The salon name **Atelier Beauty**, images, staff, services, products, and prices are placeholders until the real salon provides its content.
+**Current stage: Phase 2 operational foundation / preview. Not production-ready.** The salon name **Atelier Beauty**, images, staff, services, products, and prices are placeholders until the real salon provides its content.
 
 ## Project structure
 
 ```text
 apps/
-  web/   React + Vite frontend (public site, booking, shop, account, admin preview)
+  web/   React + Vite frontend (public site, booking, shop, account, admin portal)
   api/   Node.js + Express API, Socket.IO, MongoDB data access, Appwrite authentication, Stripe
 ```
 
@@ -26,7 +26,7 @@ Run `npm test` for API tests and the web worker test; `npm run build` for the fr
 
 ### Demo mode
 
-`DEMO_MODE=true` is explicitly **development-only**. It uses seeded products, services, and specialists; appointments and chat messages are stored in memory if `MONGODB_URI` is omitted. Data disappears when the server restarts. The demo profile is `demo-customer`; preview admin is at `/admin`.
+`DEMO_MODE=true` is explicitly **development-only**. It uses seeded products, services, and specialists; all changes are stored in memory if `MONGODB_URI` is omitted. Data disappears when the server restarts. The demo profile is `demo-customer`; preview admin is at `/admin`. Admin tabs use real `/admin/products`, `/admin/inventory`, `/admin/services`, `/admin/team`, `/admin/appointments`, `/admin/orders`, `/admin/chat` and `/admin/settings` routes.
 
 **Never deploy demo mode publicly.** Production startup refuses `DEMO_MODE=true` and requires a database plus Appwrite authentication configuration. For production, the `ADMIN_USER_IDS` setting must contain only trusted Appwrite user IDs. Admin permissions are checked server-side.
 
@@ -62,6 +62,12 @@ Never commit real secrets or place Stripe secret keys in `VITE_*` variables.
 | POST | `/api/chat` | Store and broadcast a message |
 | GET | `/api/admin/overview`, `/api/admin/conversations` | Admin-only dashboard and chat inbox |
 | PATCH | `/api/admin/appointments/:id` | Admin appointment status update |
+| GET/POST | `/api/admin/products`, `/api/admin/services`, `/api/admin/staff` | List all records / create records |
+| PATCH | `/api/admin/products/:id`, `/api/admin/services/:id`, `/api/admin/staff/:id` | Edit catalog and team, including visibility |
+| GET | `/api/admin/inventory` | Current stock and movement audit log |
+| POST | `/api/admin/inventory/:id/adjust` | Atomic stock adjustment with audit reason |
+| GET | `/api/admin/orders`, `/api/admin/integrations` | Order listing and safe service-status flags |
+| PATCH | `/api/admin/orders/:id/fulfillment` | Track fulfillment on paid orders |
 | POST | `/api/checkout` | Stripe Checkout Session |
 | POST | `/api/stripe/webhook` | Signed payment events |
 
@@ -76,6 +82,10 @@ Socket.IO: authenticated `chat:join`, `chat:typing`, and broadcast `chat:message
 - Hair/nail/beauty service selection, specialist/date/time selection, appointment request and confirmation
 - Customer account screen with Appwrite sign-in/sign-up integration points
 - Admin dashboard, appointment status updates, and live chat inbox with server-side access checks
+- Full editor screens for product catalog, visibility, price, service menu, specialist specialties and standard workdays/hours
+- Inventory adjustments with nonnegative stock enforcement and a 30-item movement audit view
+- Order administration: payment state, customer email when received from Stripe, item snapshots, and paid-order fulfillment state
+- Dedicated responsive admin shell with sidebar and searchable/filterable product table
 - WebSocket chat transport, persistent message API when MongoDB is configured
 - Stripe Checkout Session creation and signed webhook handling
 - Health endpoint and basic backend tests
@@ -84,7 +94,9 @@ Socket.IO: authenticated `chat:join`, `chat:typing`, and broadcast `chat:message
 
 - Supply final salon brand, logo, photography, real products, staff, hours, prices, and service availability
 - Replace the fixed time-slot example with real operating hours, staff schedules, time zones, duration-aware availability and transactional locking
-- Complete admin CRUD for products, inventory, services, staff, order fulfillment, and advanced chat assignment
+- Connect actual operating hours, per-specialist schedule exceptions, booking duration-based conflict prevention and availability to the customer booking UI
+- Add inventory reservations / post-payment deductions, guest checkout contact details, shipping/pickup options, fulfillment labels, real refunds, and order/customer history
+- Implement advanced chat assignment, notifications, product image uploads, role granularity, and staff access policies
 - Finish customer order history, shipping/tax/fulfillment, cancellations, refunds, transactional email, and booking deposits
 - Add server-side rate limiting, audit logging, file attachment restrictions, stronger chat moderation, MFA, monitoring, and backups
 - Add comprehensive end-to-end and Stripe test-mode coverage; verify deployment behind HTTPS

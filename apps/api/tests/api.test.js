@@ -59,3 +59,53 @@ test('admin can change appointment state and customer cannot', async () => withS
   assert.equal(allowed.status, 200);
   assert.equal((await allowed.json()).status, 'confirmed');
 }));
+
+test('admin catalog changes are validated and update public visibility', async () => withServer(async (url) => {
+  const admin = { 'content-type': 'application/json', 'x-demo-role': 'admin' };
+  const input = { name: 'Scalp Serum', sku: 'AB-HC-099', category: 'Hair Care', price: 39, inventory: 7, lowStockThreshold: 4, image: '/images/product-oil.webp', description: 'Hydrate and soothe', featured: false, active: true };
+  const blocked = await fetch(`${url}/api/admin/products`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) });
+  assert.equal(blocked.status, 403);
+  const created = await fetch(`${url}/api/admin/products`, { method: 'POST', headers: admin, body: JSON.stringify(input) });
+  assert.equal(created.status, 201);
+  const product = await created.json();
+  assert.ok(product.id);
+  const duplicate = await fetch(`${url}/api/admin/products`, { method: 'POST', headers: admin, body: JSON.stringify({ ...input, name: 'Duplicate serum' }) });
+  assert.equal(duplicate.status, 409);
+  const hidden = await fetch(`${url}/api/admin/products/${product.id}`, { method: 'PATCH', headers: admin, body: JSON.stringify({ ...input, active: false, inventory: undefined }) });
+  assert.equal(hidden.status, 200);
+  const publicCatalog = await (await fetch(`${url}/api/products`)).json();
+  const privateCatalog = await (await fetch(`${url}/api/admin/products`, { headers: admin })).json();
+  assert.equal(publicCatalog.some((p) => p.id === product.id), false);
+  assert.equal(privateCatalog.some((p) => p.id === product.id), true);
+}));
+
+test('inventory adjustments are audited and never allow negative stock', async () => withServer(async (url) => {
+  const headers = { 'content-type': 'application/json', 'x-demo-role': 'admin' };
+  const adjustment = (delta) => fetch(`${url}/api/admin/inventory/balm/adjust`, { method: 'POST', headers, body: JSON.stringify({ delta, reason: 'Physical stock count' }) });
+  assert.equal((await adjustment(-4)).status, 200);
+  const rejected = await adjustment(-10);
+  assert.equal(rejected.status, 409);
+  const inventory = await (await fetch(`${url}/api/admin/inventory`, { headers })).json();
+  assert.equal(inventory.products.find((p) => p.id === 'balm').inventory, 1);
+  assert.equal(inventory.movements.length, 1);
+  assert.equal(inventory.movements[0].delta, -4);
+}));
+
+test('services, specialists, and integration status are admin-managed', async () => withServer(async (url) => {
+  const headers = { 'content-type': 'application/json', 'x-demo-role': 'admin' };
+  const service = await fetch(`${url}/api/admin/services`, { method: 'POST', headers, body: JSON.stringify({ name: 'Blowout', category: 'Hair', durationMinutes: 45, price: 60, description: 'Professional finish', active: true }) });
+  assert.equal(service.status, 201);
+  const badStaff = await fetch(`${url}/api/admin/staff`, { method: 'POST', headers, body: JSON.stringify({ name: 'New Stylist', specialties: ['Hair'], workDays: [1, 2], startTime: '18:00', endTime: '09:00', active: true }) });
+  assert.equal(badStaff.status, 400);
+  const staff = await fetch(`${url}/api/admin/staff`, { method: 'POST', headers, body: JSON.stringify({ name: 'New Stylist', specialties: ['Hair'], workDays: [1, 2], startTime: '09:00', endTime: '18:00', active: true }) });
+  assert.equal(staff.status, 201);
+  const integrations = await (await fetch(`${url}/api/admin/integrations`, { headers })).json();
+  assert.equal(integrations.payments, false);
+  assert.equal(integrations.demo, true);
+}));
+
+test('unpaid orders cannot be marked as fulfilled', async () => {
+  const store = new MemoryStore();
+  await store.createOrder({ id: 'pending', status: 'pending', fulfillmentStatus: 'unfulfilled' });
+  await assert.rejects(store.updateOrderFulfillment('pending', 'fulfilled'), { status: 409 });
+});

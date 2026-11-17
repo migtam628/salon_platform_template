@@ -30,3 +30,18 @@ Hybrid of the user's chosen concepts: editorial warm-ivory typography, deep oliv
 3. Add full availability engine and operational workflows before taking real bookings or payments.
 
 This is a foundation-stage signoff only, not a production launch approval.
+
+## Phase 2 admin screen
+
+- Concept: `docs/admin-concept.webp`, generated from the previously approved storefront direction.
+- Intended desktop native size: 1536×1024. Browser screenshot comparison remains pending because the local preview host could not be reached from the connected browser and local Chromium IPC was denied.
+- Source-level fidelity ledger:
+  1. **Left rail:** fixed pale-ivory sidebar, serif wordmark, nine operational links, selected olive row — implemented in `admin.css` / `AdminPortal.jsx`.
+  2. **Top hierarchy:** slim operation bar, gold hairline, serif “Products & catalog” heading, right aligned olive “Add product” — implemented.
+  3. **Metrics:** three low-key product/stock/category tiles, not a generic chart dashboard — implemented with live counts.
+  4. **Catalog anatomy:** search/filter controls, thumbnail/name/SKU/price/stock/visibility/edit columns — implemented.
+  5. **Editor:** right rail for product properties with labels and olive save action — implemented. Stock is edited only on the Inventory page after creation to preserve an adjustment audit trail; this intentionally differs from the concept's inline stock field.
+  6. **Stock watch:** low-stock list below catalog — implemented with live inventory rather than the illustrative numbers in the image.
+- Responsive breakpoint rules are provided for 1350px, 1040px, 790px and 550px. **Not visually verified in a browser yet.**
+- Copy exception: generated concept includes sample products and counts; runtime is data-driven and begins with three sample products.
+- Future QA must include screenshot inspection at 1536×1024 and 390×844, form interactions, and a five-point side-by-side comparison before public deployment.
