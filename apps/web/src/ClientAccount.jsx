@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { ArrowRight, CalendarDays, CreditCard, UserRound } from 'lucide-react';
+import { ArrowRight, CalendarDays, CreditCard, ShoppingBag, UserRound } from 'lucide-react';
 import { api, account, demoMode, signIn, signUp } from './client';
 import { tomorrow } from './data';
 
@@ -25,6 +25,19 @@ export default function ClientAccount({ user, refreshUser, notify, appointments,
   const [slot, setSlot] = useState('');
   const [slotError, setSlotError] = useState('');
   const [slotBusy, setSlotBusy] = useState(false);
+  const [orders, setOrders] = useState([]);
+  const [ordersBusy, setOrdersBusy] = useState(false);
+  const [ordersError, setOrdersError] = useState('');
+
+  useEffect(() => {
+    if (!user) { setOrders([]); return; }
+    let active = true;
+    setOrdersBusy(true);
+    api('/orders').then((rows) => { if (active) { setOrders(rows); setOrdersError(''); } })
+      .catch((error) => { if (active) setOrdersError(error.message); })
+      .finally(() => { if (active) setOrdersBusy(false); });
+    return () => { active = false; };
+  }, [user?.$id]);
 
   async function submit(event) {
     event.preventDefault(); setBusy(true);
@@ -102,7 +115,14 @@ export default function ClientAccount({ user, refreshUser, notify, appointments,
           {changingId === appointment.id && <form className="account-reschedule" onSubmit={reschedule}><h3>Choose another time</h3><label>New date<input type="date" required min={tomorrow()} value={date} onChange={(event) => setDate(event.target.value)}/></label>{slotBusy ? <p>Checking available times…</p> : slotError ? <p className="booking-slot-empty error">{slotError}</p> : options?.slots?.length ? <div className="time-grid">{options.slots.map((option) => <button type="button" key={option.startAt} className={slot === option.startAt ? 'active' : ''} onClick={() => setSlot(option.startAt)}>{option.label}</button>)}</div> : <p>No available times for this date.</p>}<div className="account-reschedule-actions"><button type="button" className="outline-button" onClick={() => setChangingId('')}>Keep current time</button><button className="btn btn-green" type="submit" disabled={!slot || busy}>Request new time</button></div><p className="small-note">Rescheduling a confirmed appointment sends the new time back for approval.</p></form>}
         </div>) : <p className="empty-state">No appointments yet. Your future visits will appear here.</p>}
       </section>
-      <section><div className="section-head"><h2>My details</h2><UserRound size={22}/></div><div className="detail-row"><small>Name</small><strong>{user.name}</strong></div><div className="detail-row"><small>Email</small><strong>{demoMode ? 'Preview account' : user.email}</strong></div><div className="detail-row"><small>Orders</small><strong>Purchase history appears once Stripe checkout is connected.</strong></div>{!demoMode && <button className="text-link" onClick={async () => { await account.deleteSession({ sessionId: 'current' }); await refreshUser(); }}>Sign out</button>}</section>
+      <section><div className="section-head"><h2>My details</h2><UserRound size={22}/></div><div className="detail-row"><small>Name</small><strong>{user.name}</strong></div><div className="detail-row"><small>Email</small><strong>{demoMode ? 'Preview account' : user.email}</strong></div><div className="detail-row"><small>Purchases</small><strong>{ordersBusy ? 'Loading…' : `${orders.length} linked order${orders.length === 1 ? '' : 's'}`}</strong></div>{!demoMode && <button className="text-link" onClick={async () => { await account.deleteSession({ sessionId: 'current' }); await refreshUser(); }}>Sign out</button>}</section>
+      <section className="account-orders"><div className="section-head"><h2>Purchase history</h2><ShoppingBag size={22}/></div>
+        {ordersBusy ? <p className="empty-state">Loading your purchases…</p> : ordersError ? <p className="empty-state">Unable to load purchases: {ordersError}</p> : orders.length ? orders.map((order) => <article className="account-order" key={order.id}>
+          <div className="account-row"><div><strong>Order #{order.id.slice(0, 8).toUpperCase()}</strong><p>{new Date(order.createdAt).toLocaleDateString('en-US', { dateStyle: 'medium' })} · {order.fulfillmentMethod === 'pickup' ? 'Salon pickup' : 'Retail order'}</p></div><strong>{money(order.totalCents ?? Math.round(order.totalAmount * 100))}</strong></div>
+          <div className="account-order-products">{(order.items || []).map((item) => <span key={item.productId}>{item.quantity} × {item.name}</span>)}</div>
+          <div className="account-order-states"><span className="state-pill">Payment: {order.status.replaceAll('_', ' ')}</span><span className="state-pill">Fulfillment: {order.fulfillmentStatus}</span>{order.refund?.status && <span className="state-pill">Refund: {order.refund.status}</span>}</div>
+        </article>) : <p className="empty-state">No purchases linked to your account yet. Sign in before checkout to see future orders here. Guest checkouts are not automatically linked.</p>}
+      </section>
     </div>
   </main>;
 }

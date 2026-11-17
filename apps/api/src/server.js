@@ -39,6 +39,10 @@ io.on('connection', (socket) => {
 });
 
 server.listen(Number(config.PORT || 4000), () => console.log(`Salon API listening on port ${config.PORT || 4000}`));
+// Safety net for abandoned retail Checkout Sessions when expiry webhooks are delayed or unavailable.
+const inventoryTimer = setInterval(() => store.releaseExpiredOrders().catch((error) => console.error('Retail stock reservation cleanup failed:', error.message)), 60_000);
+inventoryTimer.unref();
+store.releaseExpiredOrders().catch((error) => console.error('Initial retail reservation cleanup failed:', error.message));
 if (config.RESEND_API_KEY && config.SALON_EMAIL_FROM) {
   let inProgress = false;
   const poll = async () => {

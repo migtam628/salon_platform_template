@@ -3,18 +3,19 @@
 **A custom beauty, hair, and nail salon platform with a public storefront, customer accounts, appointment scheduling, an admin operations portal, real-time chat, and Stripe payments.**
 
 > [!IMPORTANT]
-> **Phase 4 development preview — not production-ready.** “Atelier Beauty,” its photos, product names, services, stylists, pricing, and editorial copy are demonstration content. The real salon must supply its brand, policies, personnel, and payment configuration before launch. This project is **independent of Shopify**.
+> **Phase 5 development preview — not production-ready.** “Atelier Beauty,” its photos, product names, services, stylists, pricing, and editorial copy are demonstration content. The real salon must supply its brand, policies, personnel, and payment configuration before launch. This project is **independent of Shopify**.
 
 | Experience | Implemented | Needs configuration / additional work |
 | --- | --- | --- |
 | Salon website | Responsive home, services, story, shop, booking | Real brand and imagery |
-| Client account | Appwrite sign-in integration, appointment history, reschedule/cancel, deposit action | Real Appwrite project; order history |
-| Storefront | Products, search/filter, cart, Stripe Checkout Sessions | Shipping, tax, reservations, returns/refunds |
+| Client account | Appwrite sign-in integration, appointments, linked purchase history, reschedule/cancel, deposit action | Real Appwrite project; guest-order claim or receipt verification |
+| Storefront | Products, category filters, cart, stock reservations, Stripe Checkout Sessions | Shipping, sales tax, store policy content, real test-mode verification |
 | Scheduling | Live availability, 15-minute blocks, working days, breaks, holidays, special hours | Cancellation cutoff policies, multi-location, calendar sync |
-| Admin | Dashboard, products, stock, services, team, weekly appointment calendar, scheduling, orders, chat | Expanded permissions and audit trail |
+| Admin | Dashboard, products, stock, services, team, weekly appointment calendar, scheduling, order fulfillment, full refunds, chat | Expanded permissions and audit trail |
 | Live chat | Socket.IO, private conversations, admin replies | Moderation, agent assignment |
 | Notifications | Persistent outbox, updates and 24-hour reminders | Verified email sender and Resend API key |
 | Stripe service deposits | Configurable percentage, hosted checkout, signed webhook | Default **OFF**; salon policy and real test-mode verification |
+| Retail stock & refunds | Timed stock holds, signed settlement, inventory movements, full admin refunds, optional restock | MongoDB replica set for transactions; test-mode refund/return policy validation |
 
 ## 1. Visual direction
 
@@ -41,6 +42,8 @@ flowchart TB
     A --> D[Live chat]
     B --> E[Customer account]
     C --> F[Stripe checkout]
+    F --> I[Pickup order history]
+    I --> J[Admin pickup or refund]
     E --> G[Reschedule or cancel]
     E --> H[Optional appointment deposit]
     H --> F
@@ -187,7 +190,7 @@ stateDiagram-v2
 
 ## 5. Storefront and retail checkout
 
-Customers can browse products, filter categories, add items to the cart, and continue to hosted Stripe Checkout.
+Customers can browse products, filter categories, add items to the cart, and continue to hosted Stripe Checkout. Phase 5 adds **inventory holds, verifiable payment settlement, a customer purchase ledger, salon-pickup tracking, and administrator-initiated full refunds.**
 
 ```mermaid
 sequenceDiagram
@@ -196,17 +199,64 @@ sequenceDiagram
     participant Stripe
     participant MongoDB
     Customer->>SalonAPI: POST /api/checkout (product IDs + quantities)
-    SalonAPI->>MongoDB: Read catalog and stock
-    SalonAPI->>Stripe: Create Checkout Session
+    SalonAPI->>MongoDB: Reserve units atomically and save order
+    SalonAPI->>Stripe: Create 35-minute Checkout Session
     SalonAPI-->>Customer: Hosted payment URL
     Customer->>Stripe: Pay securely
-    Stripe->>SalonAPI: Signed webhook
-    SalonAPI->>MongoDB: Mark matching order paid
+    Stripe->>SalonAPI: Signed paid webhook
+    SalonAPI->>MongoDB: Verify amount, session and currency
+    SalonAPI->>MongoDB: Consume stock and audit each movement
+    SalonAPI-->>Customer: Purchase visible in signed-in account
 ```
 
-The server—not the browser—supplies the product price to Stripe. Payments are not marked successful from a redirect or client-side callback. Orders are updated after a verified webhook reports payment.
+The server—not the browser—supplies the product price to Stripe. Payments are not marked successful from a redirect or client-side callback. Only a valid signed Stripe event referencing the same Checkout Session, currency, and exact order amount can settle a purchase. Duplicate events cannot deduct inventory twice.
 
-**Still to implement before real retail launch:** inventory reservation/decrement after payment, pickup/shipping selection, tax handling, shipping labels, automatic refunds, returns, and a complete customer order-history page.
+### Inventory and order states
+
+```mermaid
+stateDiagram-v2
+    [*] --> pending: Reserve available stock
+    pending --> paid: Signed paid event
+    pending --> expired: Checkout expires or fails
+    expired --> paid_stock_review: Late paid event
+    paid --> refunded: Successful full refund
+    paid_stock_review --> refunded: Compensating refund
+    paid --> fulfilled: Admin confirms pickup
+```
+
+The `fulfilled` branch above represents the separate *fulfillment status*, not a change to the paid order's payment status.
+
+| Event | Inventory result | Order result |
+| --- | --- | --- |
+| Checkout starts | Increase each product's `reserved` counter; physical `inventory` unchanged | `pending`, `stockState=reserved` |
+| Customer pays | Decrease both `inventory` and `reserved`; audit each SKU | `paid`, `stockState=consumed` |
+| Checkout expires | Release reserved units; physical inventory unchanged | `expired`, `stockState=released` |
+| Webhook is delayed beyond release | **No stock is silently deducted** | `paid_stock_review`: staff must resolve or refund |
+| Refund succeeds, no confirmed return | No stock change | `refunded`, original fulfillment retained |
+| Refund succeeds, returned stock confirmed | Increase units once, create audit entries | `refunded`, `refundRestockedAt` recorded |
+
+The Stripe Checkout Session expires after approximately **35 minutes**. An independent cleanup worker releases stale pending holds after **50 minutes** if the expiry webhook is missing. The 15-minute buffer allows for routine webhook delays. Payment events that arrive after a hold is released receive a clearly visible manual-review state; they are **not** treated as safe-to-fulfill orders.
+
+### Admin order desk and customer history
+
+1. Open `/admin/orders` to filter orders, check payments, inspect itemized totals, and change the pickup progress from `unfulfilled` to `processing` or `fulfilled`. The API rejects fulfillment of unpaid or stock-review orders.
+2. For an authorized full refund, select an order, review its paid total, and use **Issue full refund**. The refund call uses a stable Stripe idempotency key to avoid repeat charges/refunds on retries.
+3. **Restock is OFF by default.** Turn it on only once returned products have physically arrived. Stock is restored after Stripe confirms the refund succeeded, never just because an admin clicked the button.
+4. A signed-in customer can open `/account` to view purchases made while authenticated. Guest checkout is supported, but guest orders are intentionally **not automatically assigned by email** to an account (that would expose purchase history to someone who merely knows an address).
+
+```mermaid
+flowchart TB
+    A[Admin opens paid order] --> B{Returned units in salon?}
+    B -->|Yes| C[Request full refund + restock]
+    B -->|No| D[Request full refund only]
+    C --> E[Stripe confirms refund]
+    D --> E
+    E --> F[Update status and audit]
+```
+
+**Current retail limits:** Store pickup only; the admin pickup flag does not create shipping labels or pickup notifications. Shipping, automatic tax calculation, postal addresses, returns/RMA workflow, partial refunds, guest-order claiming, and store-level tax/receipt compliance are **not implemented**. Do not enable real customer payments until these have been configured and verified for the business.
+
+**MongoDB requirement:** Retail stock reservations and Stripe settlement use multi-document MongoDB transactions. Production MongoDB must run as a **replica set or supported managed cluster**; standalone MongoDB is not sufficient for transactional retail checkout. The in-memory demo store implements the same state machine but is not durable.
 
 ## 6. Optional appointment deposits
 
@@ -279,7 +329,7 @@ Delivery is disabled unless **both** `RESEND_API_KEY` and a verified `SALON_EMAI
 
 ## 9. Run locally
 
-Prerequisites: **Node.js 22+**, npm, and optionally MongoDB for persistent development data.
+Prerequisites: **Node.js 22+**, npm, and optionally MongoDB for persistent development data. Retail checkout against MongoDB requires a transaction-capable replica set or managed cluster.
 
 ```bash
 git clone https://github.com/migtam628/salon_platform_template.git
@@ -302,7 +352,7 @@ npm test
 npm run build
 ```
 
-The test suite checks API authorization, booking conflicts, staff scheduling, rescheduling/cancellation, Stripe configuration safeguards, deposit calculations and checkout state, notification behavior, frontend compilation, and the static-hosting worker. Tests do **not** replace a live Stripe test-mode transaction or manual browser QA.
+The test suite checks API authorization, booking conflicts, staff scheduling, rescheduling/cancellation, Stripe configuration safeguards, deposit calculations and checkout state, retail stock holds, exact signed Stripe settlement, expiry cleanup, account-scoped order history, refund authorization/idempotency, one-time restocking, notification behavior, frontend compilation, and the static-hosting worker. Mocked provider tests do **not** replace a live Stripe test-mode transaction, a MongoDB replica-set integration test, or manual browser QA.
 
 ## 10. Environment configuration
 
@@ -342,6 +392,7 @@ All routes begin with `/api`. Customer appointment and private chat routes requi
 | GET | `/products`, `/services`, `/staff` | Public active catalog and team |
 | GET | `/availability?serviceId=&staffId=&date=` | Live opening times for a specialist/service/date |
 | GET | `/appointments` | Customer’s bookings; all bookings for admins |
+| GET | `/orders` | Signed-in customer's own retail orders, newest first |
 | POST | `/appointments` | Validate and reserve requested appointment |
 | GET | `/appointments/:id/availability?date=` | Valid times when moving an existing booking |
 | PATCH | `/appointments/:id` | Reschedule; returns to `requested` |
@@ -363,8 +414,9 @@ All routes begin with `/api`. Customer appointment and private chat routes requi
 | PATCH | `/admin/staff/:id` | Edit weekly hours, breaks, and date exceptions |
 | GET | `/admin/inventory` | Inventory and adjustment audit |
 | POST | `/admin/inventory/:id/adjust` | Audited stock adjustment |
-| GET | `/admin/orders` | Retail orders |
-| PATCH | `/admin/orders/:id/fulfillment` | Fulfillment on paid orders |
+| GET | `/admin/orders` | All retail orders with inventory, refund and payment states |
+| PATCH | `/admin/orders/:id/fulfillment` | Change pickup workflow only for safely settled paid orders |
+| POST | `/admin/orders/:id/refund` | Request full Stripe refund; optional `{ "restock": false }` |
 | PATCH | `/admin/appointments/:id` | Confirm/complete/cancel appointment |
 | GET | `/admin/conversations` | Admin chat inbox |
 | GET | `/admin/notifications` | Email queue status |
@@ -374,8 +426,8 @@ All routes begin with `/api`. Customer appointment and private chat routes requi
 
 | Method | Endpoint | Description |
 | --- | --- | --- |
-| POST | `/checkout` | Validate retail cart and create Stripe Checkout Session |
-| POST | `/stripe/webhook` | Verify Stripe event signature, persist paid order/deposit status |
+| POST | `/checkout` | Deduplicate cart items, hold inventory, create expiring Stripe Checkout Session |
+| POST | `/stripe/webhook` | Verify event signature, settle orders and deposits, release expired holds, update refunds |
 
 ## 12. Core data model
 
@@ -389,9 +441,13 @@ erDiagram
     PRODUCT ||--o{ INVENTORY_MOVEMENT : records
     ORDER ||--o{ ORDER_ITEM : contains
     PRODUCT ||--o{ ORDER_ITEM : sold_as
+    USER ||--o{ ORDER : purchases
+    ORDER ||--o| REFUND : authorizes
 ```
 
 An appointment stores the selected service and staff snapshots, precise `startAt`, salon-local `bookingDate`, duration, reserved 15-minute intervals, booking status, customer identity, and—when enabled—the deposit amount and payment state. A MongoDB partial unique multikey index on `staffId + occupiedSlots` prevents overlapping active bookings during concurrent requests. Historical appointments without interval records are migrated during startup where possible.
+
+A retail order stores immutable per-line SKU/name/price/quantity snapshots, `totalCents`, `checkoutSessionId`, optional authenticated `userId`, customer email, stock reservation expiry, inventory settlement state, pickup status, and optionally an authorized full-refund record. Products track both physical `inventory` and currently held `reserved` quantities. Every sale and eligible refund restock creates an `inventory_movements` audit record. Orders from older schema versions do **not** automatically inherit a verified stock hold; reconcile legacy pending orders before enabling live retail payments.
 
 ## 13. Production launch checklist
 
@@ -405,7 +461,9 @@ Use this checklist before giving the site to real paying customers:
 - [ ] Confirm real service durations, bookings/cancellations, no-show, and deposit policies.
 - [ ] If using deposits, test Stripe Checkout Session creation, signed webhooks, duplicate-payment prevention, cancellation, and manual refund procedure in test mode.
 - [ ] If using email, verify the sender domain and send genuine test booking/reminder emails.
-- [ ] Finish inventory reservation and settlement, pickup/shipping, taxes, refunds, and customer order history.
+- [x] Implement inventory holds/settlement, pickup tracking, account-linked orders, and admin full-refund foundation (mocked API tests).
+- [ ] Configure real pickup address/contact/policies, taxes, compliant receipts, shipping if offered, and partial-refund/return process.
+- [ ] Test production MongoDB transactions and live Stripe **test-mode** checkout/expiration/refund webhook timing, including failed and delayed events.
 - [ ] Add rate limiting, stronger audit logs, monitoring, backups, retry visibility, and deployment health checks.
 - [ ] Run API tests, production build, hosting tests, mobile/desktop browser QA, accessibility checks, and transactional end-to-end tests.
 - [ ] Review webhook delivery/replay behavior and test server restarts during checkout and notification delivery.
@@ -419,12 +477,12 @@ Use this checklist before giving the site to real paying customers:
 | 2 | Product and stock admin, services/team, orders, dashboard and chat inbox | Implemented preview |
 | 3 | Live schedule, customer rescheduling/cancellation, weekly admin calendar, email outbox | Implemented preview |
 | 4 | Staff breaks/holidays/special dates and configurable appointment deposit collection | Implemented preview |
-| 5 | Retail fulfillment, inventory consistency, customer order history, refund operations | Planned |
+| 5 | Retail pickup desk, transactional stock reservations, customer order history, full refunds | Implemented preview |
 | 6 | Security hardening, real-provider end-to-end tests, monitoring, deployment | Planned |
 
 ### Important limitations
 
-The project is a **template and functional development foundation**, not a finished point-of-sale or production merchant system. It currently does **not** include Shopify, automatic Stripe refunds, recurring subscriptions, SMS reminders, external calendar sync, retail stock deductions after settlement, multi-location scheduling, or a real salon’s configured brand/content. Browser screenshots have not been presented as verified application renders; the images above are clearly labeled design references.
+The project is a **template and functional development foundation**, not a finished point-of-sale or production merchant system. It currently does **not** include Shopify, automatic refund approvals, partial refunds, shipping/label purchase, automated tax configuration, recurring subscriptions, SMS reminders, external calendar sync, multi-location scheduling, or a real salon’s configured brand/content. Browser screenshots have not been presented as verified application renders; the images above are clearly labeled design references.
 
 ---
 

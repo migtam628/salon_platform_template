@@ -16,7 +16,13 @@ const appointmentSchema = z.object({
 const appointmentTimeSchema = z.object({ startAt: z.iso.datetime() });
 const availabilityQuerySchema = z.object({ serviceId: z.string().min(1), staffId: z.string().min(1), date: z.iso.date() });
 const messageSchema = z.object({ conversationId: z.string().min(2).max(100), text: z.string().trim().min(1).max(1500) });
-const cartSchema = z.object({ items: z.array(z.object({ productId: z.string(), quantity: z.number().int().min(1).max(20) })).min(1).max(30) });
+const cartSchema = z.object({ items: z.array(z.object({ productId: z.string(), quantity: z.number().int().min(1).max(20) })).min(1).max(30) }).superRefine((cart, ctx) => {
+  const ids = new Set();
+  for (const [index, item] of cart.items.entries()) {
+    if (ids.has(item.productId)) ctx.addIssue({ code: 'custom', path: ['items', index, 'productId'], message: 'A product may only appear once in the cart.' });
+    ids.add(item.productId);
+  }
+});
 const imageSchema = z.string().trim().max(500).refine((value) => !value || value.startsWith('/images/') || /^https:\/\//.test(value), 'Image must use HTTPS or a local image path.');
 const productSchema = z.object({
   name: z.string().trim().min(2).max(120), sku: z.string().trim().toUpperCase().regex(/^[A-Z0-9_-]{3,40}$/),
@@ -87,13 +93,20 @@ export function createApp({ store, config = process.env, onMessage = () => {}, s
       if (await store.hasEvent(event.id)) return res.json({ received: true, duplicate: true });
       if (['checkout.session.completed', 'checkout.session.async_payment_succeeded'].includes(event.type)) {
         const session = event.data.object;
-        if (session.payment_status === 'paid' && session.metadata?.orderId) await store.markOrderPaid(session.metadata.orderId, session.payment_intent || '', session.customer_details?.email || session.customer_email);
+        if (session.payment_status === 'paid' && session.metadata?.orderId) await store.markOrderPaid(session.metadata.orderId, session.payment_intent || '', session.customer_details?.email || session.customer_email,
+          { sessionId: session.id, clientReferenceId: session.client_reference_id, amountTotal: session.amount_total, currency: session.currency });
         if (session.payment_status === 'paid' && session.metadata?.paymentKind === 'appointment_deposit') {
           if (session.currency !== 'usd' || !session.metadata?.appointmentId || !Number.isSafeInteger(session.amount_total)) throw new Error('Invalid appointment deposit payload.');
           const booking = await store.getAppointment(session.metadata.appointmentId);
           if (!booking || booking.depositCheckoutSessionId !== session.id) throw new Error('Appointment deposit Checkout Session did not match the pending payment.');
           await store.markAppointmentDepositPaid(session.metadata.appointmentId, session.payment_intent || '', session.amount_total);
         }
+      }
+      if (event.type === 'checkout.session.expired' && event.data.object.metadata?.orderId) {
+        await store.releaseOrderReservation(event.data.object.metadata.orderId, event.data.object.id);
+      }
+      if (['refund.created', 'refund.updated', 'refund.failed'].includes(event.type) && event.data.object.metadata?.orderId) {
+        await store.applyOrderRefund(event.data.object.metadata.orderId, event.data.object);
       }
       await store.recordEvent(event.id);
       res.json({ received: true });
@@ -139,6 +152,10 @@ export function createApp({ store, config = process.env, onMessage = () => {}, s
     } catch { res.status(401).json({ error: 'Invalid or expired session.' }); }
   }
   function adminOnly(req, res, next) { if (req.user?.role !== 'admin') return res.status(403).json({ error: 'Administrator access required.' }); next(); }
+  function optionalAuthenticate(req, res, next) {
+    if (demo || req.headers.authorization) return authenticate(req, res, next);
+    return next();
+  }
   app.get('/api/appointments', authenticate, async (req, res, next) => { try { res.json(await store.listAppointments(req.user.role === 'admin' ? undefined : req.user.id)); } catch (e) { next(e); } });
   app.get('/api/appointments/:id/availability', authenticate, async (req, res, next) => {
     try {
@@ -277,11 +294,25 @@ export function createApp({ store, config = process.env, onMessage = () => {}, s
     } catch (e) { next(e); }
   });
   app.get('/api/admin/orders', authenticate, adminOnly, async (_req, res, next) => { try { res.json(await store.listOrders()); } catch (e) { next(e); } });
+  app.get('/api/orders', authenticate, async (req, res, next) => { try { res.json(await store.listOrders(req.user.id)); } catch (e) { next(e); } });
   app.patch('/api/admin/orders/:id/fulfillment', authenticate, adminOnly, async (req, res, next) => {
     try {
       const { fulfillmentStatus } = z.object({ fulfillmentStatus: z.enum(['unfulfilled', 'processing', 'fulfilled']) }).parse(req.body);
       const saved = await store.updateOrderFulfillment(req.params.id, fulfillmentStatus);
       if (!saved) return res.status(404).json({ error: 'Order not found.' });
+      res.json(saved);
+    } catch (e) { next(e); }
+  });
+  app.post('/api/admin/orders/:id/refund', authenticate, adminOnly, async (req, res, next) => {
+    try {
+      if (!stripe || !config.STRIPE_WEBHOOK_SECRET) return res.status(503).json({ error: 'Stripe refunds are not configured.' });
+      const { restock } = z.object({ restock: z.boolean().default(false) }).parse(req.body);
+      const order = await store.beginOrderRefund(req.params.id, restock, req.user.id);
+      if (!order) return res.status(404).json({ error: 'Order not found.' });
+      // A stable idempotency key protects against duplicate Stripe refunds after retries/timeouts.
+      const refund = await stripe.refunds.create({ payment_intent: order.paymentIntent, reason: 'requested_by_customer', metadata: { orderId: order.id } },
+        { idempotencyKey: `salon-full-refund-${order.id}` });
+      const saved = await store.applyOrderRefund(order.id, refund);
       res.json(saved);
     } catch (e) { next(e); }
   });
@@ -312,24 +343,35 @@ export function createApp({ store, config = process.env, onMessage = () => {}, s
       res.json(result);
     } catch (e) { next(e); }
   });
-  app.post('/api/checkout', async (req, res, next) => {
+  app.post('/api/checkout', optionalAuthenticate, async (req, res, next) => {
     try {
       if (!stripe || !config.STRIPE_WEBHOOK_SECRET) return res.status(503).json({ error: 'Stripe checkout is not configured yet.' });
       const { items } = cartSchema.parse(req.body);
+      await store.releaseExpiredOrders();
       const catalog = await store.listProducts();
       const lineItems = items.map(({ productId, quantity }) => {
         const item = catalog.find((p) => p.id === productId);
-        if (!item || item.inventory < quantity) throw Object.assign(new Error('Product unavailable or insufficient stock.'), { status: 400 });
+        if (!item || item.inventory - (item.reserved || 0) < quantity) throw Object.assign(new Error('Product unavailable or insufficient stock.'), { status: 409 });
         return { price_data: { currency: 'usd', product_data: { name: item.name }, unit_amount: Math.round(item.price * 100) }, quantity };
       });
       const orderedProducts = items.map(({ productId, quantity }) => {
         const product = catalog.find((p) => p.id === productId);
         return { productId, sku: product.sku || '', name: product.name, unitPrice: product.price, quantity };
       });
-      const order = await store.createOrder({ id: randomUUID(), items: orderedProducts, totalAmount: orderedProducts.reduce((sum, item) => sum + item.unitPrice * item.quantity, 0), currency: 'usd', status: 'pending', fulfillmentStatus: 'unfulfilled', customerEmail: null, createdAt: new Date().toISOString() });
-      const base = config.PUBLIC_WEB_URL || 'http://localhost:5173';
-      const session = await stripe.checkout.sessions.create({ mode: 'payment', line_items: lineItems, success_url: `${base}/shop?checkout=success`, cancel_url: `${base}/shop?checkout=cancelled`, metadata: { orderId: order.id } });
-      res.status(201).json({ url: session.url });
+      const totalCents = lineItems.reduce((sum, row) => sum + row.price_data.unit_amount * row.quantity, 0);
+      const order = await store.createOrder({ id: randomUUID(), items: orderedProducts, totalCents, totalAmount: totalCents / 100, currency: 'usd',
+        status: 'pending', fulfillmentStatus: 'unfulfilled', fulfillmentMethod: 'pickup', userId: req.user?.id || null,
+        customerEmail: req.user?.email && !req.user.email.endsWith('.invalid') ? req.user.email : null,
+        reservationExpiresAt: new Date(Date.now() + 50 * 60_000).toISOString(), createdAt: new Date().toISOString() });
+      try {
+        const base = config.PUBLIC_WEB_URL || 'http://localhost:5173';
+        const session = await stripe.checkout.sessions.create({ mode: 'payment', payment_method_types: ['card'], line_items: lineItems, expires_at: Math.floor(Date.now() / 1000) + 35 * 60,
+          success_url: `${base}/shop?checkout=success`, cancel_url: `${base}/shop?checkout=cancelled`,
+          ...(order.customerEmail ? { customer_email: order.customerEmail } : {}),
+          client_reference_id: order.id, metadata: { orderId: order.id } }, { idempotencyKey: `salon-retail-${order.id}` });
+        await store.setOrderCheckoutSession(order.id, session);
+        res.status(201).json({ url: session.url });
+      } catch (error) { await store.releaseOrderReservation(order.id); throw error; }
     } catch (e) { next(e); }
   });
 

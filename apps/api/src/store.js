@@ -4,6 +4,22 @@ import { products as seedProducts, services as seedServices, staff as seedStaff 
 import { overlaps, occupiedSlots } from './booking.js';
 
 const clone = (value) => structuredClone(value);
+const conflict = (message) => Object.assign(new Error(message), { status: 409 });
+const nowIso = () => new Date().toISOString();
+
+function assertPaymentMatches(order, payment) {
+  const validSession = order.checkoutSessionId ? order.checkoutSessionId === payment.sessionId : payment.clientReferenceId === order.id;
+  if (!validSession || !payment.sessionId || order.totalCents !== payment.amountTotal || order.currency !== payment.currency || !payment.paymentIntent) {
+    throw new Error('Stripe payment does not match the stored Checkout Session and order total.');
+  }
+}
+
+function assertRefundMatches(order, refund) {
+  if (!order.refundRequestedAt || !refund.id || refund.payment_intent !== order.paymentIntent || refund.amount !== order.totalCents || (refund.metadata?.orderId && refund.metadata.orderId !== order.id)) {
+    throw new Error('Stripe refund does not match an authorized full-order refund request.');
+  }
+  if (order.refund?.id && order.refund.id !== refund.id) throw new Error('A different refund is already linked to this order.');
+}
 
 export class MemoryStore {
   constructor() {
@@ -33,7 +49,7 @@ export class MemoryStore {
   async adjustInventory(id, delta, reason, actorId) {
     const product = this.products.find((p) => p.id === id);
     if (!product) return null;
-    if (product.inventory + delta < 0) throw Object.assign(new Error('Stock cannot become negative.'), { status: 409 });
+    if (product.inventory + delta < (product.reserved || 0)) throw conflict('Stock cannot fall below units reserved for checkout.');
     product.inventory += delta;
     this.inventoryMovements.push({ id: randomUUID(), productId: id, productName: product.name, delta, reason, actorId, createdAt: new Date().toISOString() });
     return clone(product);
@@ -111,8 +127,39 @@ export class MemoryStore {
   async listMessages(conversationId) { return clone(this.messages.filter((m) => m.conversationId === conversationId).slice(-100)); }
   async listConversations() { const ids = [...new Set(this.messages.map((m) => m.conversationId))]; return ids.map((id) => { const messages = this.messages.filter((m) => m.conversationId === id); return { id, lastMessage: messages.at(-1), count: messages.length }; }); }
   async saveMessage(message) { this.messages.push(message); return clone(message); }
-  async createOrder(order) { this.orders.push(order); return clone(order); }
-  async listOrders() { return clone(this.orders.slice().reverse()); }
+  async createOrder(order) {
+    for (const item of order.items || []) {
+      const product = this.products.find((row) => row.id === item.productId && row.active !== false);
+      if (!product || product.inventory - (product.reserved || 0) < item.quantity) throw conflict('Product unavailable or insufficient unreserved stock.');
+    }
+    for (const item of order.items || []) {
+      const product = this.products.find((p) => p.id === item.productId);
+      product.reserved = (product.reserved || 0) + item.quantity;
+    }
+    this.orders.push({ ...order, stockState: 'reserved' });
+    return clone(this.orders.at(-1));
+  }
+  async getOrder(id) { return clone(this.orders.find((o) => o.id === id) || null); }
+  async listOrders(userId) { return clone(this.orders.filter((o) => !userId || o.userId === userId).slice().reverse()); }
+  async setOrderCheckoutSession(id, session) {
+    const order = this.orders.find((o) => o.id === id && o.status === 'pending' && o.stockState === 'reserved');
+    if (!order) throw conflict('Order reservation is no longer available.');
+    order.checkoutSessionId = session.id;
+    order.checkoutExpiresAt = new Date(session.expires_at * 1000).toISOString();
+  }
+  async releaseOrderReservation(id, expectedSessionId) {
+    const order = this.orders.find((o) => o.id === id);
+    if (!order || order.status !== 'pending' || order.stockState !== 'reserved') return false;
+    if (expectedSessionId && order.checkoutSessionId !== expectedSessionId) throw new Error('Checkout Session does not match order reservation.');
+    for (const item of order.items) this.products.find((p) => p.id === item.productId).reserved -= item.quantity;
+    Object.assign(order, { status: 'expired', stockState: 'released', updatedAt: nowIso() });
+    return true;
+  }
+  async releaseExpiredOrders(at = nowIso()) {
+    const expired = this.orders.filter((o) => o.status === 'pending' && o.stockState === 'reserved' && o.reservationExpiresAt <= at);
+    for (const order of expired) await this.releaseOrderReservation(order.id);
+    return expired.length;
+  }
   async updateOrderFulfillment(id, fulfillmentStatus) {
     const order = this.orders.find((o) => o.id === id);
     if (!order) return null;
@@ -121,7 +168,60 @@ export class MemoryStore {
     order.updatedAt = new Date().toISOString();
     return clone(order);
   }
-  async markOrderPaid(orderId, paymentIntent, email) { const order = this.orders.find((o) => o.id === orderId); if (order) { order.status = 'paid'; order.paymentIntent = paymentIntent; order.customerEmail = email || order.customerEmail || null; } return order; }
+  async markOrderPaid(orderId, paymentIntent, email, payment) {
+    const order = this.orders.find((o) => o.id === orderId);
+    if (!order) throw new Error('Paid Stripe order was not found.');
+    assertPaymentMatches(order, { ...payment, paymentIntent });
+    if (['paid', 'refunded'].includes(order.status)) {
+      if (order.paymentIntent !== paymentIntent) throw new Error('Order was paid with a different payment intent.');
+      return clone(order);
+    }
+    if (order.stockState !== 'reserved') {
+      Object.assign(order, { status: 'paid_stock_review', checkoutSessionId: payment.sessionId, paymentIntent, customerEmail: email || order.customerEmail, updatedAt: nowIso() });
+      return clone(order);
+    }
+    for (const item of order.items) {
+      const product = this.products.find((p) => p.id === item.productId);
+      if (!product || (product.reserved || 0) < item.quantity || product.inventory < item.quantity) throw new Error('Reserved inventory is inconsistent.');
+    }
+    for (const item of order.items) {
+      const product = this.products.find((p) => p.id === item.productId);
+      product.inventory -= item.quantity;
+      product.reserved -= item.quantity;
+      this.inventoryMovements.push({ id: randomUUID(), productId: item.productId, productName: item.name, delta: -item.quantity, reason: `Stripe order ${order.id}`, actorId: 'stripe', createdAt: nowIso() });
+    }
+    Object.assign(order, { status: 'paid', stockState: 'consumed', checkoutSessionId: payment.sessionId, paymentIntent, customerEmail: email || order.customerEmail, paidAt: nowIso(), updatedAt: nowIso() });
+    return clone(order);
+  }
+  async beginOrderRefund(id, restock, actorId) {
+    const order = this.orders.find((o) => o.id === id);
+    if (!order) return null;
+    if (!['paid', 'paid_stock_review'].includes(order.status) || !order.paymentIntent || order.refund?.status === 'succeeded') throw conflict('Only settled, non-refunded orders can be refunded.');
+    if (['failed', 'canceled'].includes(order.refund?.status)) throw conflict('This refund needs reconciliation in Stripe before retrying.');
+    if (order.status === 'paid_stock_review' && restock) throw conflict('An order without settled stock cannot be restocked by a refund.');
+    if (order.refundRequestedAt && order.refundRestock !== restock) throw conflict('The existing refund request has a different restock decision.');
+    if (!order.refundRequestedAt) Object.assign(order, { refundRequestedAt: nowIso(), refundRestock: restock, refundRequestedBy: actorId });
+    return clone(order);
+  }
+  async applyOrderRefund(id, refund) {
+    const order = this.orders.find((o) => o.id === id);
+    if (!order) throw new Error('Refund order was not found.');
+    assertRefundMatches(order, refund);
+    if (order.refund?.status === 'succeeded') return clone(order);
+    if (refund.status === 'succeeded' && order.refundRestock && !order.refundRestockedAt) {
+      for (const item of order.items || []) {
+        const product = this.products.find((p) => p.id === item.productId);
+        if (!product) throw new Error('Cannot restock a deleted product.');
+        product.inventory += item.quantity;
+        this.inventoryMovements.push({ id: randomUUID(), productId: item.productId, productName: item.name, delta: item.quantity, reason: `Refund return ${order.id}`, actorId: order.refundRequestedBy, createdAt: nowIso() });
+      }
+      order.refundRestockedAt = nowIso();
+    }
+    order.refund = { id: refund.id, status: refund.status, updatedAt: nowIso() };
+    if (refund.status === 'succeeded') order.status = 'refunded';
+    order.updatedAt = nowIso();
+    return clone(order);
+  }
   async hasEvent(id) { return this.processedEvents.has(id); }
   async recordEvent(id) { this.processedEvents.add(id); }
   async dashboard() { return { appointments: this.appointments.length, orders: this.orders.length, products: this.products.filter((p) => p.active !== false).length, lowStock: this.products.filter((p) => p.active !== false && p.inventory <= (p.lowStockThreshold ?? 6)).length, messages: this.messages.length, recentAppointments: clone(this.appointments.slice(-6).reverse()), recentOrders: clone(this.orders.slice(-6).reverse()) }; }
@@ -144,6 +244,8 @@ export class MongoStore {
       db.collection('appointments').createIndex({ staffId: 1, occupiedSlots: 1 }, { name: 'unique_booked_quarters', unique: true, partialFilterExpression: { status: { $in: ['requested', 'confirmed'] } } }),
       db.collection('messages').createIndex({ conversationId: 1, createdAt: -1 }),
       db.collection('orders').createIndex({ id: 1 }, { unique: true }),
+      db.collection('orders').createIndex({ userId: 1, createdAt: -1 }),
+      db.collection('orders').createIndex({ status: 1, reservationExpiresAt: 1 }),
       db.collection('stripe_events').createIndex({ id: 1 }, { unique: true }),
       db.collection('products').createIndex({ sku: 1 }, { unique: true, partialFilterExpression: { sku: { $type: 'string' } } }),
       db.collection('inventory_movements').createIndex({ createdAt: -1 }),
@@ -169,7 +271,7 @@ export class MongoStore {
   }
   async listInventoryMovements() { return this.db.collection('inventory_movements').find({}, { projection: { _id: 0 } }).sort({ createdAt: -1 }).limit(30).toArray(); }
   async adjustInventory(id, delta, reason, actorId) {
-    const filter = { id, ...(delta < 0 ? { inventory: { $gte: -delta } } : {}) };
+    const filter = { id, ...(delta < 0 ? { $expr: { $gte: [{ $add: ['$inventory', delta] }, { $ifNull: ['$reserved', 0] }] } } : {}) };
     const product = await this.db.collection('products').findOneAndUpdate(filter, { $inc: { inventory: delta } }, { returnDocument: 'after', projection: { _id: 0 } });
     if (!product) {
       if (await this.db.collection('products').findOne({ id })) throw Object.assign(new Error('Stock cannot become negative.'), { status: 409 });
@@ -245,14 +347,120 @@ export class MongoStore {
   async listMessages(conversationId) { return (await this.db.collection('messages').find({ conversationId }, { projection: { _id: 0 } }).sort({ createdAt: -1 }).limit(100).toArray()).reverse(); }
   async listConversations() { return this.db.collection('messages').aggregate([{ $sort: { createdAt: -1 } }, { $group: { _id: '$conversationId', lastMessage: { $first: '$$ROOT' }, count: { $sum: 1 } } }, { $project: { _id: 0, id: '$_id', lastMessage: { id: '$lastMessage.id', text: '$lastMessage.text', createdAt: '$lastMessage.createdAt', senderRole: '$lastMessage.senderRole' }, count: 1 } }, { $sort: { 'lastMessage.createdAt': -1 } }]).toArray(); }
   async saveMessage(message) { await this.db.collection('messages').insertOne(message); return message; }
-  async createOrder(order) { await this.db.collection('orders').insertOne(order); return order; }
-  async listOrders() { return this.db.collection('orders').find({}, { projection: { _id: 0 } }).sort({ createdAt: -1 }).limit(100).toArray(); }
+  async transaction(work) {
+    const session = this.client.startSession();
+    try { return await session.withTransaction(() => work(session)); }
+    finally { await session.endSession(); }
+  }
+  async createOrder(order) {
+    return this.transaction(async (session) => {
+      for (const item of order.items) {
+        const product = await this.db.collection('products').findOneAndUpdate({ id: item.productId, active: { $ne: false },
+          $expr: { $gte: [{ $subtract: ['$inventory', { $ifNull: ['$reserved', 0] }] }, item.quantity] } },
+        { $inc: { reserved: item.quantity } }, { session, returnDocument: 'after' });
+        if (!product) throw conflict('Product unavailable or insufficient unreserved stock.');
+      }
+      await this.db.collection('orders').insertOne({ ...order, stockState: 'reserved' }, { session });
+      return { ...order, stockState: 'reserved' };
+    });
+  }
+  async getOrder(id) { return this.db.collection('orders').findOne({ id }, { projection: { _id: 0 } }); }
+  async listOrders(userId) { return this.db.collection('orders').find(userId ? { userId } : {}, { projection: { _id: 0 } }).sort({ createdAt: -1 }).limit(100).toArray(); }
+  async setOrderCheckoutSession(id, checkout) {
+    const result = await this.db.collection('orders').updateOne({ id, status: 'pending', stockState: 'reserved' },
+      { $set: { checkoutSessionId: checkout.id, checkoutExpiresAt: new Date(checkout.expires_at * 1000).toISOString() } });
+    if (!result.matchedCount) throw conflict('Order reservation is no longer available.');
+  }
+  async releaseOrderReservation(id, expectedSessionId) {
+    return this.transaction(async (session) => {
+      const order = await this.db.collection('orders').findOne({ id }, { session });
+      if (!order || order.status !== 'pending' || order.stockState !== 'reserved') return false;
+      if (expectedSessionId && order.checkoutSessionId !== expectedSessionId) throw new Error('Checkout Session does not match order reservation.');
+      for (const item of order.items) {
+        const product = await this.db.collection('products').updateOne({ id: item.productId, reserved: { $gte: item.quantity } }, { $inc: { reserved: -item.quantity } }, { session });
+        if (!product.matchedCount) throw new Error('Reserved stock could not be safely released.');
+      }
+      await this.db.collection('orders').updateOne({ id }, { $set: { status: 'expired', stockState: 'released', updatedAt: nowIso() } }, { session });
+      return true;
+    });
+  }
+  async releaseExpiredOrders(at = nowIso()) {
+    const rows = await this.db.collection('orders').find({ status: 'pending', stockState: 'reserved', reservationExpiresAt: { $lte: at } }, { projection: { id: 1 } }).limit(100).toArray();
+    let count = 0;
+    for (const row of rows) if (await this.releaseOrderReservation(row.id)) count++;
+    return count;
+  }
   async updateOrderFulfillment(id, fulfillmentStatus) {
     const order = await this.db.collection('orders').findOneAndUpdate({ id, status: 'paid' }, { $set: { fulfillmentStatus, updatedAt: new Date().toISOString() } }, { returnDocument: 'after', projection: { _id: 0 } });
     if (!order && await this.db.collection('orders').findOne({ id })) throw Object.assign(new Error('An unpaid order cannot be fulfilled.'), { status: 409 });
     return order;
   }
-  async markOrderPaid(orderId, paymentIntent, email) { await this.db.collection('orders').updateOne({ id: orderId }, { $set: { status: 'paid', paymentIntent, customerEmail: email || null } }); }
+  async markOrderPaid(orderId, paymentIntent, email, payment) {
+    return this.transaction(async (session) => {
+      const orders = this.db.collection('orders');
+      const order = await orders.findOne({ id: orderId }, { session });
+      if (!order) throw new Error('Paid Stripe order was not found.');
+      assertPaymentMatches(order, { ...payment, paymentIntent });
+      if (['paid', 'refunded'].includes(order.status)) {
+        if (order.paymentIntent !== paymentIntent) throw new Error('Order was paid with a different payment intent.');
+        return order;
+      }
+      if (order.stockState !== 'reserved') {
+        await orders.updateOne({ id: orderId }, { $set: { status: 'paid_stock_review', checkoutSessionId: payment.sessionId, paymentIntent, customerEmail: email || order.customerEmail, updatedAt: nowIso() } }, { session });
+        return { ...order, status: 'paid_stock_review' };
+      }
+      for (const item of order.items) {
+        const result = await this.db.collection('products').updateOne({ id: item.productId, reserved: { $gte: item.quantity }, inventory: { $gte: item.quantity } },
+          { $inc: { reserved: -item.quantity, inventory: -item.quantity } }, { session });
+        if (!result.matchedCount) throw new Error('Reserved inventory is inconsistent.');
+        await this.db.collection('inventory_movements').insertOne({ id: randomUUID(), productId: item.productId, productName: item.name,
+          delta: -item.quantity, reason: `Stripe order ${order.id}`, actorId: 'stripe', createdAt: nowIso() }, { session });
+      }
+      await orders.updateOne({ id: orderId }, { $set: { status: 'paid', stockState: 'consumed', checkoutSessionId: payment.sessionId, paymentIntent, customerEmail: email || order.customerEmail, paidAt: nowIso(), updatedAt: nowIso() } }, { session });
+      return { ...order, status: 'paid' };
+    });
+  }
+  async beginOrderRefund(id, restock, actorId) {
+    return this.transaction(async (session) => {
+      const orders = this.db.collection('orders');
+      const order = await orders.findOne({ id }, { session });
+      if (!order) return null;
+      if (!['paid', 'paid_stock_review'].includes(order.status) || !order.paymentIntent || order.refund?.status === 'succeeded') throw conflict('Only settled, non-refunded orders can be refunded.');
+      if (['failed', 'canceled'].includes(order.refund?.status)) throw conflict('This refund needs reconciliation in Stripe before retrying.');
+      if (order.status === 'paid_stock_review' && restock) throw conflict('An order without settled stock cannot be restocked by a refund.');
+      if (order.refundRequestedAt && order.refundRestock !== restock) throw conflict('The existing refund request has a different restock decision.');
+      if (!order.refundRequestedAt) {
+        const fields = { refundRequestedAt: nowIso(), refundRestock: restock, refundRequestedBy: actorId };
+        await orders.updateOne({ id }, { $set: fields }, { session });
+        return { ...order, ...fields };
+      }
+      return order;
+    });
+  }
+  async applyOrderRefund(id, refund) {
+    return this.transaction(async (session) => {
+      const orders = this.db.collection('orders');
+      const order = await orders.findOne({ id }, { session });
+      if (!order) throw new Error('Refund order was not found.');
+      assertRefundMatches(order, refund);
+      if (order.refund?.status === 'succeeded') return order;
+      const fields = { refund: { id: refund.id, status: refund.status, updatedAt: nowIso() }, updatedAt: nowIso() };
+      if (refund.status === 'succeeded') {
+        fields.status = 'refunded';
+        if (order.refundRestock && !order.refundRestockedAt) {
+          for (const item of order.items) {
+            const result = await this.db.collection('products').updateOne({ id: item.productId }, { $inc: { inventory: item.quantity } }, { session });
+            if (!result.matchedCount) throw new Error('Cannot restock a deleted product.');
+            await this.db.collection('inventory_movements').insertOne({ id: randomUUID(), productId: item.productId, productName: item.name,
+              delta: item.quantity, reason: `Refund return ${order.id}`, actorId: order.refundRequestedBy, createdAt: nowIso() }, { session });
+          }
+          fields.refundRestockedAt = nowIso();
+        }
+      }
+      await orders.updateOne({ id }, { $set: fields }, { session });
+      return { ...order, ...fields };
+    });
+  }
   async hasEvent(id) { return Boolean(await this.db.collection('stripe_events').findOne({ id })); }
   async recordEvent(id) { await this.db.collection('stripe_events').updateOne({ id }, { $setOnInsert: { id, processedAt: new Date().toISOString() } }, { upsert: true }); }
   async dashboard() {

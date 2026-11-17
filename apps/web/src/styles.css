@@ -152,6 +152,11 @@ h1, h2, h3, p { margin-top: 0; }
 .detail-row { display: flex; flex-direction: column; gap: 6px; padding: 13px 0; border-bottom: 1px solid var(--line); }
 .detail-row small { color: var(--muted); }
 .detail-row strong { font-weight: 500; }
+.account-orders { grid-column: 1 / -1; }
+.account-order { padding: 20px 0; border-top: 1px solid var(--line); }
+.account-order:first-of-type { border-top: 0; }
+.account-order-products { display: flex; flex-wrap: wrap; gap: 7px 20px; margin: 12px 0; color: var(--muted); font-size: 14px; }
+.account-order-states { display: flex; flex-wrap: wrap; gap: 8px; }
 .demo-ribbon { background: #eeeadc; padding: 15px 20px; margin-bottom: 30px; border-left: 3px solid var(--gold); font-size: 14px; }
 .stat-grid { display: grid; grid-template-columns: repeat(4,1fr); gap: 18px; margin-bottom: 30px; }
 .stat { border: 1px solid var(--line); padding: 23px; background: #fffcf7; }

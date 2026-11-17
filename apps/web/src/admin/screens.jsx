@@ -17,7 +17,7 @@ function PageTitle({ title, intro, action, children }) {
 function PrimaryButton({ children, ...props }) { return <button className="admin-primary" {...props}>{children}</button>; }
 function Empty({ title, detail, icon: Icon = Package }) { return <div className="admin-empty"><Icon size={30} strokeWidth={1.4}/><h3>{title}</h3><p>{detail}</p></div>; }
 function Toggle({ label, checked, onChange }) { return <label className="admin-toggle"><input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)}/><span>{label}</span></label>; }
-function StockFlag({ item }) { const low = item.inventory <= (item.lowStockThreshold ?? 6); return <span className={`admin-pill ${low ? 'warning' : 'good'}`}>{low ? 'Low stock' : 'In stock'} ({item.inventory})</span>; }
+function StockFlag({ item }) { const available = item.inventory - (item.reserved || 0); const low = available <= (item.lowStockThreshold ?? 6); return <span className={`admin-pill ${low ? 'warning' : 'good'}`} title={`${item.inventory} on hand · ${item.reserved || 0} reserved`}>{low ? 'Low stock' : 'In stock'} ({available} available)</span>; }
 function Visibility({ active }) { return <span className={`admin-pill ${active === false ? 'muted' : 'visible'}`}><i/>{active === false ? 'Hidden' : 'Visible'}</span>; }
 
 export function Dashboard({ data, go }) {

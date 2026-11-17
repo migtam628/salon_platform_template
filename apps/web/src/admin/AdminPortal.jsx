@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Bell, CalendarDays, CalendarOff, ChevronDown, Home, Layers3, Menu, MessageCircle, Scissors, Settings2, ShoppingBag, Tag, UsersRound, X } from 'lucide-react';
 import { api, demoMode } from '../client';
-import { Dashboard, InventoryManager, LiveChatManager, OrdersManager, ProductManager, ServiceManager, SettingsManager, TeamManager } from './screens';
+import { Dashboard, InventoryManager, LiveChatManager, ProductManager, ServiceManager, SettingsManager, TeamManager } from './screens';
+import OrdersDesk from './OrdersDesk';
 import BookingCalendar from './BookingCalendar';
 import SchedulingManager from './SchedulingManager';
 import './admin.css';
@@ -51,6 +52,10 @@ export default function AdminPortal({ path, navigate }) {
     try { await api(`/admin/orders/${id}/fulfillment`, { method: 'PATCH', body: JSON.stringify({ fulfillmentStatus }) }, 'admin'); await refresh(); setNotice('Order status updated.'); }
     catch (e) { setNotice(e.message); }
   };
+  const refundOrder = async (id, restock) => {
+    try { await api(`/admin/orders/${id}/refund`, { method: 'POST', body: JSON.stringify({ restock }) }, 'admin'); await refresh(); setNotice('Stripe refund request recorded.'); }
+    catch (e) { setNotice(e.message); throw e; }
+  };
   const selected = links.find((link) => link.slug === tab);
 
   return <div className="salon-admin">
@@ -72,7 +77,7 @@ export default function AdminPortal({ path, navigate }) {
           {tab === 'services' && <ServiceManager services={data.services} onSave={(row, id) => mutate('services', row, id)}/>}
           {tab === 'team' && <TeamManager staff={data.staff} onSave={(row, id) => mutate('staff', row, id)}/>}
           {tab === 'scheduling' && <SchedulingManager staff={data.staff} onSave={(row, id) => mutate('staff', row, id)} notify={setNotice}/>}
-          {tab === 'orders' && <OrdersManager orders={data.orders} onStatus={updateOrder}/>}
+          {tab === 'orders' && <OrdersDesk orders={data.orders} onStatus={updateOrder} onRefund={refundOrder} paymentsEnabled={data.integrations?.payments}/>}
           {tab === 'chat' && <LiveChatManager conversations={data.conversations} refresh={refresh} notify={setNotice}/>}
           {tab === 'settings' && <SettingsManager integrations={data.integrations} notifications={data.notifications}/>}
         </>}

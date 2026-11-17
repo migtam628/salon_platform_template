@@ -5,7 +5,8 @@ import { api, account, authConfigured, demoMode } from './client';
 import { price } from './data';
 
 export function ProductCard({ item, onAdd }) {
-  return <article className="product-card"><div className="product-photo"><img src={item.image || '/images/product-shampoo.webp'} alt={item.name} loading="lazy"/><button className="quick-add" disabled={item.inventory <= 0} onClick={() => onAdd(item)} aria-label={item.inventory <= 0 ? `${item.name} is sold out` : `Add ${item.name} to bag`}><Plus size={18}/></button></div><div className="product-caption"><strong>{item.name}</strong><span>{price(item.price)}</span></div><p>{item.inventory <= 0 ? 'Currently sold out' : item.description}</p></article>;
+  const available = item.inventory - (item.reserved || 0);
+  return <article className="product-card"><div className="product-photo"><img src={item.image || '/images/product-shampoo.webp'} alt={item.name} loading="lazy"/><button className="quick-add" disabled={available <= 0} onClick={() => onAdd(item)} aria-label={available <= 0 ? `${item.name} is sold out` : `Add ${item.name} to bag`}><Plus size={18}/></button></div><div className="product-caption"><strong>{item.name}</strong><span>{price(item.price)}</span></div><p>{available <= 0 ? 'Currently sold out' : item.description}</p></article>;
 }
 
 export function Header({ path, navigate, cartCount, openCart }) {
