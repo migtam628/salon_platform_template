@@ -1,0 +1,16 @@
+{
+  "name": "salon-platform-template",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "workspaces": ["apps/*"],
+  "scripts": {
+    "dev": "concurrently -n api,web -c green,blue \"npm run dev -w @salon/api\" \"npm run dev -w web\"",
+    "dev:web": "npm run dev -w web",
+    "dev:api": "npm run dev -w @salon/api",
+    "build": "npm run build -w web",
+    "test": "npm run test -w @salon/api && npm run build -w web && npm run test:sites -w web"
+  },
+  "devDependencies": {"concurrently": "^9.2.1"},
+  "overrides": { "rollup": "4.48.1" }
+}
