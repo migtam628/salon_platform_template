@@ -98,6 +98,13 @@ h1, h2, h3, p { margin-top: 0; }
 .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
 .time-grid { display: grid; grid-template-columns: repeat(4,1fr); gap: 11px; }
 .time-grid button { padding: 13px; border: 1px solid #c8c5bb; background: transparent; }
+.booking-slot-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; }
+.booking-slot-heading strong { font-size: 14px; }
+.booking-slot-heading span { color: var(--muted); font-size: 12px; }
+.booking-availability { max-height: 295px; overflow-y: auto; margin-top: -10px; padding: 3px; }
+.booking-availability .time-grid { grid-template-columns: repeat(4, minmax(0,1fr)); }
+.booking-slot-empty { color: var(--muted); background: #f0eee5; border-left: 2px solid var(--gold); padding: 18px; line-height: 1.55; font-size: 14px; margin: 0; }
+.booking-slot-empty.error { color: #9d462f; background: #faf0ec; }
 .optional { color: var(--muted); font-weight: 400; }
 .submit-booking { align-self: flex-start; margin-top: 5px; }
 .small-note { color: var(--muted); font-size: 12px; line-height: 1.55; max-width: 500px; }
@@ -127,6 +134,19 @@ h1, h2, h3, p { margin-top: 0; }
 .account-row, .admin-row { display: flex; align-items: center; justify-content: space-between; padding: 16px 0; border-bottom: 1px solid var(--line); gap: 20px; }
 .account-row strong, .admin-row strong { font-size: 16px; }
 .account-row p, .admin-row p { color: var(--muted); font-size: 13px; margin: 5px 0 0; }
+.account-appointment { border-bottom: 1px solid var(--line); padding-bottom: 16px; margin-bottom: 13px; }
+.account-appointment .account-row { border-bottom: 0; padding-bottom: 11px; }
+.account-appointment-actions { display: flex; flex-wrap: wrap; gap: 18px; }
+.account-appointment-actions button { border: 0; border-bottom: 1px solid var(--gold); background: none; padding: 3px 0 5px; font-size: 13px; color: var(--green); }
+.account-reschedule { margin-top: 18px; background: #f5f2e9; border: 1px solid var(--line); padding: 19px; display: flex; flex-direction: column; gap: 16px; }
+.account-reschedule h3 { font: 500 29px var(--serif); margin: 0; }
+.account-reschedule label { font-size: 13px; display: flex; flex-direction: column; gap: 7px; }
+.account-reschedule input { padding: 11px; min-height: 43px; border: 1px solid var(--line); background: #fffdf8; }
+.account-reschedule .time-grid { grid-template-columns: repeat(3,minmax(0,1fr)); max-height: 195px; overflow-y: auto; }
+.account-reschedule .time-grid button { padding: 10px 6px; font-size: 12px; }
+.account-reschedule-actions { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.account-reschedule-actions .btn { font-size: 13px; min-height: 42px; padding: 11px 15px; }
+.account-reschedule-actions .outline-button { font-size: 13px; padding: 11px; }
 .state-pill { background: #e9ecdf; color: var(--green); padding: 5px 9px; font-size: 12px; text-transform: capitalize; }
 .empty-state { font-size: 15px; color: var(--muted); margin: 25px 0 10px; line-height: 1.6; }
 .detail-row { display: flex; flex-direction: column; gap: 6px; padding: 13px 0; border-bottom: 1px solid var(--line); }
@@ -214,3 +234,4 @@ h1, h2, h3, p { margin-top: 0; }
 @media (max-width: 600px) { .content-wide { width: calc(100% - 36px); } .brand { font-size: 24px; letter-spacing: .075em; } .nav-tools { gap: 12px; } .nav-divider, .header-cta, .account-icon { display: none; } .hero { display: flex; flex-direction: column-reverse; height: auto; min-height: 0; } .hero-image { height: 340px; } .hero-image img { object-position: 54% 42%; } .hero-copy { padding: 28px 23px 37px; border: 0; } .hero-copy .gold-line { margin-bottom: 14px; width: 58px; } .hero-copy h1 { font-size: clamp(63px,16vw,88px); white-space: normal; margin-bottom: 20px; } .hero-copy p { font-size: 16px; line-height: 1.55; margin-bottom: 25px; } .hero-actions { flex-direction: row; align-items: center; flex-wrap: wrap; gap: 20px; } .hero-actions .btn { padding: 13px 17px; min-height: 48px; font-size: 14px; gap: 12px; } .hero-actions .text-link { font-size: 14px; } .appointment-strip { padding: 21px 18px 25px; gap: 15px; } .appointment-strip h2 { text-align: center; font-size: 30px; white-space: normal; } .service-options { width: 100%; flex: auto; border: 0; justify-content: space-between; } .service-options button { min-width: 0; font-size: 15px; gap: 8px; } .service-options button:first-child { border-left: 1px solid #a8a69e; } .service-mark { font-size: 25px; } .availability { width: 100%; } .shop-feature { padding-top: 25px; gap: 8px; } .shop-intro h2 { font-size: 58px; margin: 15px 0; } .shop-intro p { font-size: 16px; } .featured-products { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; } .featured-products .product-card:last-child { display: none; } .product-photo { aspect-ratio: .9; } .quick-add { opacity: 1; transform: none; } .product-caption { align-items: flex-start; } .product-caption strong { font-size: 10px; } .product-caption span { font-size: 11px; } .product-card p { font-size: 12px; } .philosophy { padding: 45px 0 60px; display: flex; flex-direction: column; gap: 19px; align-items: start; } .philosophy h2 { font-size: 53px; } .philosophy p { font-size: 15px; } .interior-page { padding-block: 45px 65px; } .page-heading { margin-bottom: 34px; } .page-heading h1 { font-size: 69px; } .page-heading p { font-size: 16px; } .booking-layout, .account-grid, .story-page { grid-template-columns: 1fr; } .booking-aside { display: none; } .step-heading h2 { font-size: 31px; } .form-row { grid-template-columns: 1fr; gap: 20px; } .time-grid { grid-template-columns: repeat(2,1fr); } .service-row strong { font-size: 23px; } .service-meta { font-size: 12px; gap: 9px; } .shop-toolbar { flex-direction: column; align-items: flex-start; gap: 15px; } .shop-filters { flex-wrap: wrap; } .shop-products { grid-template-columns: 1fr 1fr; gap: 20px 14px; } .shop-products .product-photo { aspect-ratio: .95; } .account-grid section { padding: 20px; } .stat-grid { grid-template-columns: 1fr 1fr; } .stat { padding: 16px; } .story-page img { height: 380px; } .site-footer { grid-template-columns: 1fr 1fr; gap: 20px; padding: 47px 22px 0; } .site-footer > div:first-child { grid-column: 1/-1; } .footer-bottom { line-height: 1.6; } .chat-widget { right: 15px; bottom: 15px; } }
 @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } * { transition-duration: .01ms !important; animation-duration: .01ms !important; } }
 @media (max-width: 600px) { .admin-chat-layout { grid-template-columns: 1fr; } .conversation-list { border-right: 0; border-bottom: 1px solid var(--line); } .admin-chat-thread { min-height: 220px; } .admin-row { align-items: flex-start; } .admin-status { text-align: right; } }
+@media (max-width: 600px) { .booking-availability .time-grid { grid-template-columns: repeat(2,minmax(0,1fr)); } .account-reschedule .time-grid { grid-template-columns: repeat(2,minmax(0,1fr)); } }

@@ -4,6 +4,7 @@ import { Server } from 'socket.io';
 import { Client, Account } from 'node-appwrite';
 import { MemoryStore, MongoStore } from './store.js';
 import { createApp } from './app.js';
+import { processDueEmails } from './notifications.js';
 
 const config = process.env;
 if (config.NODE_ENV === 'production' && (config.DEMO_MODE === 'true' || !config.MONGODB_URI || !config.APPWRITE_ENDPOINT || !config.APPWRITE_PROJECT_ID)) {
@@ -38,3 +39,16 @@ io.on('connection', (socket) => {
 });
 
 server.listen(Number(config.PORT || 4000), () => console.log(`Salon API listening on port ${config.PORT || 4000}`));
+if (config.RESEND_API_KEY && config.SALON_EMAIL_FROM) {
+  let inProgress = false;
+  const poll = async () => {
+    if (inProgress) return;
+    inProgress = true;
+    try { await processDueEmails(store, config); }
+    catch (error) { console.error('Notification worker failed:', error.message); }
+    finally { inProgress = false; }
+  };
+  const timer = setInterval(poll, 30_000);
+  timer.unref();
+  poll();
+}

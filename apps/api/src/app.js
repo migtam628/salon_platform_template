@@ -5,11 +5,15 @@ import Stripe from 'stripe';
 import { Client, Account } from 'node-appwrite';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
+import { DEFAULT_TIME_ZONE, bookingError, dailyAvailability, localParts, occupiedSlots, zonedToUtc } from './booking.js';
+import { queueBookingEmails } from './notifications.js';
 
 const appointmentSchema = z.object({
   serviceId: z.string().min(1), staffId: z.string().min(1), startAt: z.iso.datetime(),
   customerName: z.string().trim().min(2).max(100), customerEmail: z.email(), notes: z.string().max(500).optional().default(''),
 });
+const appointmentTimeSchema = z.object({ startAt: z.iso.datetime() });
+const availabilityQuerySchema = z.object({ serviceId: z.string().min(1), staffId: z.string().min(1), date: z.iso.date() });
 const messageSchema = z.object({ conversationId: z.string().min(2).max(100), text: z.string().trim().min(1).max(1500) });
 const cartSchema = z.object({ items: z.array(z.object({ productId: z.string(), quantity: z.number().int().min(1).max(20) })).min(1).max(30) });
 const imageSchema = z.string().trim().max(500).refine((value) => !value || value.startsWith('/images/') || /^https:\/\//.test(value), 'Image must use HTTPS or a local image path.');
@@ -22,19 +26,27 @@ const productSchema = z.object({
 const productCreateSchema = productSchema.extend({ inventory: z.number().int().min(0).max(1000000) });
 const serviceSchema = z.object({
   name: z.string().trim().min(2).max(120), category: z.enum(['Hair', 'Nails', 'Beauty']),
-  durationMinutes: z.number().int().min(15).max(480), price: z.number().min(0).max(100000),
+  durationMinutes: z.number().int().min(15).max(480).refine((value) => value % 15 === 0, 'Duration must be a multiple of 15 minutes.'), price: z.number().min(0).max(100000),
   description: z.string().trim().max(600), active: z.boolean(),
 });
 const timeSchema = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/);
 const staffSchema = z.object({
   name: z.string().trim().min(2).max(120), specialties: z.array(z.enum(['Hair', 'Nails', 'Beauty'])).min(1).max(3),
   workDays: z.array(z.number().int().min(0).max(6)).min(1).max(7), startTime: timeSchema, endTime: timeSchema, active: z.boolean(),
-}).refine((value) => value.startTime < value.endTime, 'End time must be after start time.');
+}).refine((value) => value.startTime < value.endTime, 'End time must be after start time.')
+  .refine((value) => [value.startTime, value.endTime].every((time) => Number(time.slice(3)) % 15 === 0), 'Working hours must be on 15-minute boundaries.');
 
 export function createApp({ store, config = process.env, onMessage = () => {} }) {
   const app = express();
   const demo = config.DEMO_MODE === 'true';
+  const timeZone = config.SALON_TIME_ZONE || DEFAULT_TIME_ZONE;
+  new Intl.DateTimeFormat('en-US', { timeZone }); // Fail fast for invalid IANA time zones.
+  const leadMinutes = Math.max(0, Number(config.BOOKING_MIN_LEAD_MINUTES || 60));
   const stripe = config.STRIPE_SECRET_KEY ? new Stripe(config.STRIPE_SECRET_KEY) : null;
+  async function notifyBooking(appointment, kind) {
+    try { await queueBookingEmails(store, appointment, kind); }
+    catch (error) { console.error(`Unable to queue appointment ${kind} notification:`, error.message); }
+  }
   app.disable('x-powered-by');
   app.use(helmet());
   app.use(cors({ origin: config.WEB_ORIGIN?.split(',') || 'http://localhost:5173' }));
@@ -62,6 +74,26 @@ export function createApp({ store, config = process.env, onMessage = () => {} })
   app.get('/api/services', async (_req, res, next) => { try { res.json(await store.listServices()); } catch (e) { next(e); } });
   app.get('/api/staff', async (_req, res, next) => { try { res.json(await store.listStaff()); } catch (e) { next(e); } });
 
+  async function slotData(serviceId, staffId, date, excludingId) {
+    const [services, staff] = await Promise.all([store.listServices(), store.listStaff()]);
+    const service = services.find((s) => s.id === serviceId);
+    const stylist = staff.find((s) => s.id === staffId);
+    if (!service || !stylist || !stylist.specialties.includes(service.category)) throw Object.assign(new Error('Choose an available service and specialist.'), { status: 400 });
+    const start = zonedToUtc(date, '00:00', timeZone);
+    const next = new Date(`${date}T00:00:00Z`);
+    next.setUTCDate(next.getUTCDate() + 1);
+    const end = zonedToUtc(next.toISOString().slice(0, 10), '00:00', timeZone);
+    if (!start || !end) throw Object.assign(new Error('Invalid appointment date.'), { status: 400 });
+    const booked = await store.listStaffAppointments(staffId, start.toISOString(), end.toISOString());
+    return dailyAvailability({ service, stylist, date, appointments: booked, timeZone, leadMinutes, excludingId });
+  }
+  app.get('/api/availability', async (req, res, next) => {
+    try {
+      const { serviceId, staffId, date } = availabilityQuerySchema.parse(req.query);
+      res.json(await slotData(serviceId, staffId, date));
+    } catch (e) { next(e); }
+  });
+
   async function authenticate(req, res, next) {
     if (demo) { req.user = { id: 'demo-customer', email: 'guest@demo.invalid', role: req.headers['x-demo-role'] === 'admin' ? 'admin' : 'customer' }; return next(); }
     const jwt = req.headers.authorization?.replace(/^Bearer /i, '');
@@ -76,6 +108,16 @@ export function createApp({ store, config = process.env, onMessage = () => {} })
   }
   function adminOnly(req, res, next) { if (req.user?.role !== 'admin') return res.status(403).json({ error: 'Administrator access required.' }); next(); }
   app.get('/api/appointments', authenticate, async (req, res, next) => { try { res.json(await store.listAppointments(req.user.role === 'admin' ? undefined : req.user.id)); } catch (e) { next(e); } });
+  app.get('/api/appointments/:id/availability', authenticate, async (req, res, next) => {
+    try {
+      const { date } = z.object({ date: z.iso.date() }).parse(req.query);
+      const appointment = await store.getAppointment(req.params.id);
+      if (!appointment) return res.status(404).json({ error: 'Appointment not found.' });
+      if (appointment.userId !== req.user.id && req.user.role !== 'admin') return res.status(403).json({ error: 'This appointment belongs to another customer.' });
+      if (!['requested', 'confirmed'].includes(appointment.status)) return res.status(409).json({ error: 'This appointment can no longer be changed.' });
+      res.json(await slotData(appointment.serviceId, appointment.staffId, date, appointment.id));
+    } catch (e) { next(e); }
+  });
   app.post('/api/appointments', authenticate, async (req, res, next) => {
     try {
       const input = appointmentSchema.parse(req.body);
@@ -83,9 +125,46 @@ export function createApp({ store, config = process.env, onMessage = () => {} })
       const service = services.find((s) => s.id === input.serviceId);
       const stylist = staff.find((s) => s.id === input.staffId);
       if (!service || !stylist || !stylist.specialties.includes(service.category)) return res.status(400).json({ error: 'Choose a valid service and specialist.' });
-      if (new Date(input.startAt).getTime() <= Date.now()) return res.status(400).json({ error: 'Appointment time must be in the future.' });
-      const saved = await store.createAppointment({ ...input, id: randomUUID(), userId: req.user.id, serviceName: service.name, staffName: stylist.name, durationMinutes: service.durationMinutes, price: service.price, status: 'requested', createdAt: new Date().toISOString() });
+      const invalid = bookingError(input.startAt, service, stylist, { timeZone, leadMinutes });
+      if (invalid) return res.status(400).json({ error: invalid });
+      if (!demo && req.user.role !== 'admin' && input.customerEmail.toLowerCase() !== req.user.email.toLowerCase()) return res.status(403).json({ error: 'Use your signed-in account email for bookings.' });
+      const bookingDate = localParts(input.startAt, timeZone).date;
+      const saved = await store.createAppointment({ ...input, id: randomUUID(), userId: req.user.id, serviceName: service.name, staffName: stylist.name, durationMinutes: service.durationMinutes, price: service.price, timeZone, bookingDate, occupiedSlots: occupiedSlots(input.startAt, service.durationMinutes), status: 'requested', createdAt: new Date().toISOString() });
+      await notifyBooking(saved, 'requested');
       res.status(201).json(saved);
+    } catch (e) { next(e); }
+  });
+  app.patch('/api/appointments/:id', authenticate, async (req, res, next) => {
+    try {
+      const { startAt } = appointmentTimeSchema.parse(req.body);
+      const appointment = await store.getAppointment(req.params.id);
+      if (!appointment) return res.status(404).json({ error: 'Appointment not found.' });
+      if (appointment.userId !== req.user.id && req.user.role !== 'admin') return res.status(403).json({ error: 'This appointment belongs to another customer.' });
+      if (!['requested', 'confirmed'].includes(appointment.status)) return res.status(409).json({ error: 'This appointment can no longer be rescheduled.' });
+      const [services, staff] = await Promise.all([store.listServices(), store.listStaff()]);
+      const service = services.find((s) => s.id === appointment.serviceId);
+      const stylist = staff.find((s) => s.id === appointment.staffId);
+      const invalid = bookingError(startAt, service, stylist, { timeZone, leadMinutes });
+      if (invalid) return res.status(400).json({ error: invalid });
+      const date = localParts(startAt, timeZone).date;
+      const availability = await slotData(appointment.serviceId, appointment.staffId, date, appointment.id);
+      if (!availability.slots.some((slot) => slot.startAt === startAt)) return res.status(409).json({ error: 'The chosen time is no longer available.' });
+      const saved = await store.rescheduleAppointment(appointment.id, startAt, occupiedSlots(startAt, appointment.durationMinutes), date);
+      if (!saved) return res.status(409).json({ error: 'This appointment can no longer be changed.' });
+      await notifyBooking(saved, 'rescheduled');
+      res.json(saved);
+    } catch (e) { next(e); }
+  });
+  app.post('/api/appointments/:id/cancel', authenticate, async (req, res, next) => {
+    try {
+      const appointment = await store.getAppointment(req.params.id);
+      if (!appointment) return res.status(404).json({ error: 'Appointment not found.' });
+      if (appointment.userId !== req.user.id && req.user.role !== 'admin') return res.status(403).json({ error: 'This appointment belongs to another customer.' });
+      if (new Date(appointment.startAt).getTime() <= Date.now()) return res.status(409).json({ error: 'Past appointments cannot be cancelled online.' });
+      const saved = await store.cancelAppointment(appointment.id);
+      if (!saved) return res.status(409).json({ error: 'This appointment can no longer be cancelled.' });
+      await notifyBooking(saved, 'cancelled');
+      res.json(saved);
     } catch (e) { next(e); }
   });
   app.get('/api/chat/:conversationId', authenticate, async (req, res, next) => {
@@ -145,15 +224,27 @@ export function createApp({ store, config = process.env, onMessage = () => {} })
   });
   app.get('/api/admin/integrations', authenticate, adminOnly, (_req, res) => res.json({
     payments: Boolean(stripe && config.STRIPE_WEBHOOK_SECRET),
+    notifications: Boolean(config.RESEND_API_KEY && config.SALON_EMAIL_FROM),
     database: Boolean(config.MONGODB_URI),
     authentication: Boolean(config.APPWRITE_ENDPOINT && config.APPWRITE_PROJECT_ID),
     demo,
   }));
+  app.get('/api/admin/notifications', authenticate, adminOnly, async (_req, res, next) => {
+    try { res.json({ configured: Boolean(config.RESEND_API_KEY && config.SALON_EMAIL_FROM), counts: await store.notificationStats() }); }
+    catch (error) { next(error); }
+  });
   app.patch('/api/admin/appointments/:id', authenticate, adminOnly, async (req, res, next) => {
     try {
       const input = z.object({ status: z.enum(['requested', 'confirmed', 'completed', 'cancelled']) }).parse(req.body);
+      const previous = await store.getAppointment(req.params.id);
+      if (previous?.status === input.status) return res.json(previous);
       const result = await store.updateAppointment(req.params.id, input.status);
       if (!result) return res.status(404).json({ error: 'Appointment not found.' });
+      if (input.status === 'completed') {
+        try { await store.replaceAppointmentNotifications(result.id, []); }
+        catch (error) { console.error('Unable to close appointment reminders:', error.message); }
+      }
+      else await notifyBooking(result, input.status);
       res.json(result);
     } catch (e) { next(e); }
   });

@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Bell, CalendarDays, ChevronDown, Home, Layers3, Menu, MessageCircle, Scissors, Settings2, ShoppingBag, Tag, UsersRound, X } from 'lucide-react';
 import { api, demoMode } from '../client';
-import { AppointmentsManager, Dashboard, InventoryManager, LiveChatManager, OrdersManager, ProductManager, ServiceManager, SettingsManager, TeamManager } from './screens';
+import { Dashboard, InventoryManager, LiveChatManager, OrdersManager, ProductManager, ServiceManager, SettingsManager, TeamManager } from './screens';
+import BookingCalendar from './BookingCalendar';
 import './admin.css';
 
 const links = [
@@ -15,14 +16,14 @@ const links = [
   { slug: 'chat', label: 'Live chat', icon: MessageCircle },
   { slug: 'settings', label: 'Settings', icon: Settings2 },
 ];
-const initial = { overview: null, products: [], services: [], staff: [], appointments: [], orders: [], conversations: [], inventory: { products: [], movements: [] }, integrations: null };
+const initial = { overview: null, products: [], services: [], staff: [], appointments: [], orders: [], conversations: [], inventory: { products: [], movements: [] }, integrations: null, notifications: { configured: false, counts: {} } };
 
 export default function AdminPortal({ path, navigate }) {
   const active = path.split('/')[2] || 'overview';
   const tab = links.some((link) => link.slug === active) ? active : 'overview';
   const [data, setData] = useState(initial), [busy, setBusy] = useState(true), [error, setError] = useState(''), [notice, setNotice] = useState(''), [menuOpen, setMenuOpen] = useState(false);
   const refresh = useCallback(async () => {
-    const keys = ['overview', 'products', 'services', 'staff', 'appointments', 'orders', 'conversations', 'inventory', 'integrations'];
+    const keys = ['overview', 'products', 'services', 'staff', 'appointments', 'orders', 'conversations', 'inventory', 'integrations', 'notifications'];
     const responses = await Promise.all(keys.map((key) => api(key === 'appointments' ? '/appointments' : `/admin/${key}`, {}, 'admin')));
     setData(Object.fromEntries(keys.map((key, index) => [key, responses[index]])));
     setError('');
@@ -63,14 +64,14 @@ export default function AdminPortal({ path, navigate }) {
       <main className="admin-content">
         {busy ? <div className="admin-loading">Loading salon operations…</div> : error ? <div className="admin-access-error"><h1>Admin access required</h1><p>{error}</p><button className="admin-primary" onClick={() => navigate('/account')}>Go to sign in</button></div> : <>
           {tab === 'overview' && <Dashboard data={data} go={go}/>}
-          {tab === 'appointments' && <AppointmentsManager rows={data.appointments} onStatus={updateAppointment}/>}
+          {tab === 'appointments' && <BookingCalendar rows={data.appointments} staff={data.staff} onStatus={updateAppointment} refresh={refresh} notify={setNotice}/>}
           {tab === 'products' && <ProductManager products={data.products} onSave={(row, id) => mutate('products', row, id)} go={go}/>}
           {tab === 'inventory' && <InventoryManager data={data.inventory} onAdjust={adjustment}/>}
           {tab === 'services' && <ServiceManager services={data.services} onSave={(row, id) => mutate('services', row, id)}/>}
           {tab === 'team' && <TeamManager staff={data.staff} onSave={(row, id) => mutate('staff', row, id)}/>}
           {tab === 'orders' && <OrdersManager orders={data.orders} onStatus={updateOrder}/>}
           {tab === 'chat' && <LiveChatManager conversations={data.conversations} refresh={refresh} notify={setNotice}/>}
-          {tab === 'settings' && <SettingsManager integrations={data.integrations}/>}
+          {tab === 'settings' && <SettingsManager integrations={data.integrations} notifications={data.notifications}/>}
         </>}
       </main>
     </div>

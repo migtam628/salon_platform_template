@@ -1,6 +1,7 @@
 import { MongoClient } from 'mongodb';
 import { randomUUID } from 'node:crypto';
 import { products as seedProducts, services as seedServices, staff as seedStaff } from './seed.js';
+import { overlaps, occupiedSlots } from './booking.js';
 
 const clone = (value) => structuredClone(value);
 
@@ -13,6 +14,7 @@ export class MemoryStore {
     this.messages = [];
     this.orders = [];
     this.inventoryMovements = [];
+    this.notifications = [];
     this.processedEvents = new Set();
   }
   async listProducts(includeInactive = false) { return clone(includeInactive ? this.products : this.products.filter((p) => p.active !== false)); }
@@ -37,10 +39,47 @@ export class MemoryStore {
     return clone(product);
   }
   async listAppointments(userId) { return clone(userId ? this.appointments.filter((a) => a.userId === userId) : this.appointments); }
-  async updateAppointment(id, status) { const item = this.appointments.find((a) => a.id === id); if (!item) return null; item.status = status; return clone(item); }
+  async listStaffAppointments(staffId, from, to) { return clone(this.appointments.filter((a) => a.staffId === staffId && a.startAt >= from && a.startAt < to)); }
+  async getAppointment(id) { return clone(this.appointments.find((a) => a.id === id) || null); }
+  async updateAppointment(id, status) {
+    const item = this.appointments.find((a) => a.id === id);
+    if (!item) return null;
+    if (this.appointments.some((a) => a.id !== id && overlaps(a, { ...item, status }))) throw Object.assign(new Error('This appointment would overlap another booking.'), { status: 409 });
+    item.status = status; item.updatedAt = new Date().toISOString(); return clone(item);
+  }
   async createAppointment(appointment) {
-    if (this.appointments.some((a) => a.staffId === appointment.staffId && a.startAt === appointment.startAt && a.status !== 'cancelled')) throw Object.assign(new Error('This time slot was just taken.'), { status: 409 });
+    if (this.appointments.some((a) => overlaps(a, appointment))) throw Object.assign(new Error('This time slot was just taken.'), { status: 409 });
     this.appointments.push(appointment); return clone(appointment);
+  }
+  async rescheduleAppointment(id, startAt, slots, bookingDate) {
+    const appointment = this.appointments.find((a) => a.id === id && ['requested', 'confirmed'].includes(a.status));
+    if (!appointment) return null;
+    const proposed = { ...appointment, startAt, bookingDate, occupiedSlots: slots, status: 'requested' };
+    if (this.appointments.some((a) => a.id !== id && overlaps(a, proposed))) throw Object.assign(new Error('This time slot was just taken.'), { status: 409 });
+    Object.assign(appointment, proposed, { updatedAt: new Date().toISOString() });
+    return clone(appointment);
+  }
+  async cancelAppointment(id) {
+    const appointment = this.appointments.find((a) => a.id === id && ['requested', 'confirmed'].includes(a.status));
+    if (!appointment) return null;
+    appointment.status = 'cancelled'; appointment.updatedAt = new Date().toISOString(); return clone(appointment);
+  }
+  async replaceAppointmentNotifications(appointmentId, jobs) {
+    this.notifications = this.notifications.map((job) => job.appointmentId === appointmentId && job.status === 'pending' ? { ...job, status: 'superseded' } : job);
+    this.notifications.push(...clone(jobs));
+  }
+  async claimDueNotification(now) {
+    const job = this.notifications.find((item) => item.status === 'pending' && item.sendAt <= now);
+    if (!job) return null;
+    job.status = 'sending'; job.claimedAt = now;
+    return clone(job);
+  }
+  async finishNotification(id, status, providerId = '', error = '', sendAt) {
+    const job = this.notifications.find((item) => item.id === id);
+    if (job) Object.assign(job, { status, providerId, error, ...(sendAt ? { sendAt, attempts: job.attempts + 1 } : {}) });
+  }
+  async notificationStats() {
+    return this.notifications.reduce((stats, item) => { stats[item.status] = (stats[item.status] || 0) + 1; return stats; }, {});
   }
   async listMessages(conversationId) { return clone(this.messages.filter((m) => m.conversationId === conversationId).slice(-100)); }
   async listConversations() { const ids = [...new Set(this.messages.map((m) => m.conversationId))]; return ids.map((id) => { const messages = this.messages.filter((m) => m.conversationId === id); return { id, lastMessage: messages.at(-1), count: messages.length }; }); }
@@ -67,13 +106,22 @@ export class MongoStore {
     const client = new MongoClient(uri);
     await client.connect();
     const db = client.db(name);
+    // Upgrade Phase 1/2 appointments before enforcing atomic, duration-aware multikey uniqueness.
+    for await (const existing of db.collection('appointments').find({ occupiedSlots: { $exists: false } }, { projection: { _id: 1, startAt: 1, durationMinutes: 1 } })) {
+      const slots = occupiedSlots(existing.startAt, existing.durationMinutes || 60);
+      if (!slots.length) throw new Error('An existing appointment has an unsupported start or duration; resolve it before migrating booking indexes.');
+      await db.collection('appointments').updateOne({ _id: existing._id }, { $set: { occupiedSlots: slots } });
+    }
     await Promise.all([
       db.collection('appointments').createIndex({ staffId: 1, startAt: 1 }, { unique: true, partialFilterExpression: { status: { $in: ['requested', 'confirmed'] } } }),
+      db.collection('appointments').createIndex({ staffId: 1, occupiedSlots: 1 }, { name: 'unique_booked_quarters', unique: true, partialFilterExpression: { status: { $in: ['requested', 'confirmed'] } } }),
       db.collection('messages').createIndex({ conversationId: 1, createdAt: -1 }),
       db.collection('orders').createIndex({ id: 1 }, { unique: true }),
       db.collection('stripe_events').createIndex({ id: 1 }, { unique: true }),
       db.collection('products').createIndex({ sku: 1 }, { unique: true, partialFilterExpression: { sku: { $type: 'string' } } }),
-      db.collection('inventory_movements').createIndex({ createdAt: -1 })
+      db.collection('inventory_movements').createIndex({ createdAt: -1 }),
+      db.collection('notifications').createIndex({ status: 1, sendAt: 1 }),
+      db.collection('notifications').createIndex({ id: 1 }, { unique: true })
     ]);
     await Promise.all([
       seedCollection(db, 'products', seedProducts),
@@ -104,10 +152,37 @@ export class MongoStore {
     return product;
   }
   async listAppointments(userId) { return this.db.collection('appointments').find(userId ? { userId } : {}, { projection: { _id: 0 } }).sort({ startAt: 1 }).toArray(); }
-  async updateAppointment(id, status) { const result = await this.db.collection('appointments').findOneAndUpdate({ id }, { $set: { status } }, { returnDocument: 'after', projection: { _id: 0 } }); return result || null; }
+  async listStaffAppointments(staffId, from, to) { return this.db.collection('appointments').find({ staffId, startAt: { $gte: from, $lt: to } }, { projection: { _id: 0 } }).toArray(); }
+  async getAppointment(id) { return this.db.collection('appointments').findOne({ id }, { projection: { _id: 0 } }); }
+  async updateAppointment(id, status) {
+    try { return await this.db.collection('appointments').findOneAndUpdate({ id }, { $set: { status, updatedAt: new Date().toISOString() } }, { returnDocument: 'after', projection: { _id: 0 } }); }
+    catch (error) { if (error.code === 11000) throw Object.assign(new Error('This appointment would overlap another booking.'), { status: 409 }); throw error; }
+  }
   async createAppointment(appointment) {
     try { await this.db.collection('appointments').insertOne(appointment); return appointment; }
     catch (error) { if (error.code === 11000) throw Object.assign(new Error('This time slot was just taken.'), { status: 409 }); throw error; }
+  }
+  async rescheduleAppointment(id, startAt, slots, bookingDate) {
+    try { return await this.db.collection('appointments').findOneAndUpdate({ id, status: { $in: ['requested', 'confirmed'] } }, { $set: { startAt, bookingDate, occupiedSlots: slots, status: 'requested', updatedAt: new Date().toISOString() } }, { returnDocument: 'after', projection: { _id: 0 } }); }
+    catch (error) { if (error.code === 11000) throw Object.assign(new Error('This time slot was just taken.'), { status: 409 }); throw error; }
+  }
+  async cancelAppointment(id) { return this.db.collection('appointments').findOneAndUpdate({ id, status: { $in: ['requested', 'confirmed'] } }, { $set: { status: 'cancelled', updatedAt: new Date().toISOString() } }, { returnDocument: 'after', projection: { _id: 0 } }); }
+  async replaceAppointmentNotifications(appointmentId, jobs) {
+    await this.db.collection('notifications').updateMany({ appointmentId, status: 'pending' }, { $set: { status: 'superseded' } });
+    if (jobs.length) await this.db.collection('notifications').insertMany(jobs);
+  }
+  async claimDueNotification(now) {
+    return this.db.collection('notifications').findOneAndUpdate({ $or: [
+      { status: 'pending', sendAt: { $lte: now } },
+      { status: 'sending', claimedAt: { $lte: new Date(Date.parse(now) - 5 * 60_000).toISOString() } },
+    ] }, { $set: { status: 'sending', claimedAt: now } }, { sort: { sendAt: 1 }, returnDocument: 'after', projection: { _id: 0 } });
+  }
+  async finishNotification(id, status, providerId = '', error = '', sendAt) {
+    await this.db.collection('notifications').updateOne({ id }, { $set: { status, providerId, error, ...(sendAt ? { sendAt } : {}) }, ...(sendAt ? { $inc: { attempts: 1 } } : {}) });
+  }
+  async notificationStats() {
+    const rows = await this.db.collection('notifications').aggregate([{ $group: { _id: '$status', count: { $sum: 1 } } }]).toArray();
+    return Object.fromEntries(rows.map((row) => [row._id, row.count]));
   }
   async listMessages(conversationId) { return (await this.db.collection('messages').find({ conversationId }, { projection: { _id: 0 } }).sort({ createdAt: -1 }).limit(100).toArray()).reverse(); }
   async listConversations() { return this.db.collection('messages').aggregate([{ $sort: { createdAt: -1 } }, { $group: { _id: '$conversationId', lastMessage: { $first: '$$ROOT' }, count: { $sum: 1 } } }, { $project: { _id: 0, id: '$_id', lastMessage: { id: '$lastMessage.id', text: '$lastMessage.text', createdAt: '$lastMessage.createdAt', senderRole: '$lastMessage.senderRole' }, count: 1 } }, { $sort: { 'lastMessage.createdAt': -1 } }]).toArray(); }

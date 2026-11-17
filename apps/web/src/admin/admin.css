@@ -155,7 +155,50 @@
 .admin-loading, .admin-access-error { max-width:600px; margin:70px auto; padding:40px; text-align:center; }
 .admin-access-error h1 { font-size:56px; }
 
+/* Weekly salon scheduling workspace */
+.admin-calendar-badge { display:inline-flex; align-items:center; gap:9px; padding:12px 16px; background:#e5eadc; color:#354a34; font-size:12px; letter-spacing:.035em; }
+.admin-calendar-toolbar { display:flex; justify-content:space-between; flex-wrap:wrap; gap:18px; align-items:end; margin:14px 0 25px; }
+.admin-calendar-period { display:flex; align-items:center; gap:13px; }
+.admin-calendar-period strong { min-width:195px; text-align:center; font-weight:500; }
+.admin-calendar-period button { border:1px solid var(--adm-line); background:#fffefa; padding:9px 11px; min-height:37px; display:inline-flex; align-items:center; justify-content:center; cursor:pointer; }
+.admin-calendar-filters { display:flex; gap:13px; flex-wrap:wrap; }
+.admin-calendar-filters label { display:grid; gap:5px; color:var(--adm-muted); font-size:11px; }
+.admin-calendar-filters select { border:1px solid var(--adm-line); background:#fffefa; padding:9px 12px; min-width:145px; }
+.admin-calendar-week { display:grid; grid-template-columns:repeat(7,minmax(115px,1fr)); border:1px solid var(--adm-line); background:#fffefa; overflow-x:auto; }
+.admin-calendar-day { min-width:115px; border-right:1px solid var(--adm-line); }
+.admin-calendar-day:last-child { border-right:0; }
+.admin-calendar-day > header { padding:14px 11px 10px; border-bottom:1px solid var(--adm-line); display:grid; gap:5px; background:#f7f6f1; }
+.admin-calendar-day.today > header { background:#e4eadb; }
+.admin-calendar-day > header strong { font-weight:600; font-size:14px; }
+.admin-calendar-day > header small { font-size:11px; color:var(--adm-muted); }
+.admin-calendar-day-body { min-height:315px; padding:9px 6px; display:flex; flex-direction:column; gap:7px; }
+.admin-calendar-event { display:flex; flex-direction:column; gap:4px; width:100%; text-align:left; padding:10px 8px; border:0; border-left:3px solid #b99e70; background:#f4eee3; color:#383d35; cursor:pointer; }
+.admin-calendar-event:hover, .admin-calendar-event:focus-visible { outline:1px solid #657858; }
+.admin-calendar-event.confirmed { border-left-color:#6c845b; background:#ebf0e5; }
+.admin-calendar-event.completed { border-left-color:#7b8b95; background:#e9eef1; }
+.admin-calendar-event.cancelled { border-left-color:#999; background:#ededeb; opacity:.7; }
+.admin-calendar-event time { color:#52614a; font-size:11px; font-weight:700; }
+.admin-calendar-event strong { font-size:12px; overflow-wrap:anywhere; }
+.admin-calendar-event small, .admin-calendar-event span { color:#697067; font-size:10px; overflow-wrap:anywhere; }
+.admin-calendar-none { color:#aaa89d; font-size:11px; text-align:center; margin:35px 0; }
+.admin-calendar-detail { margin-top:27px; }
+.admin-calendar-empty { padding:30px; text-align:center; color:var(--adm-muted); }
+.admin-calendar-overlay { position:fixed; inset:0; display:grid; place-items:center; background:#171b16aa; z-index:110; padding:20px; }
+.admin-calendar-dialog { position:relative; width:min(540px,100%); max-height:calc(100vh - 40px); overflow:auto; background:#fffefa; padding:32px; box-shadow:0 18px 50px #0003; }
+.admin-calendar-dialog h2 { margin:9px 0; font-size:36px; }
+.admin-calendar-dialog p { color:var(--adm-muted); line-height:1.6; }
+.admin-dialog-close { position:absolute; right:18px; top:15px; background:none; border:0; font-size:12px; cursor:pointer; }
+.admin-calendar-dialog form { display:grid; gap:17px; }
+.admin-calendar-dialog form label { display:grid; gap:8px; font-size:13px; }
+.admin-calendar-dialog form input { padding:12px; border:1px solid var(--adm-line); background:#fff; }
+.admin-calendar-slots { display:flex; gap:8px; flex-wrap:wrap; max-height:220px; overflow:auto; }
+.admin-calendar-slots button { border:1px solid #c8cdbc; background:#fff; padding:8px 11px; }
+.admin-calendar-slots button.active { background:#354d37; color:#fff; }
+.admin-calendar-error { color:#a73535 !important; }
+
 @media (max-width:1350px) { .admin-sidebar { width:194px; flex-basis:194px; } .admin-wordmark { padding-left:23px; font-size:28px !important; } .admin-nav-item { gap:12px; padding:12px 15px; font-size:14px; } .admin-content { padding-inline:23px; } .admin-editor-layout { grid-template-columns:minmax(0,1fr) 306px; gap:16px; } .admin-editor-panel { padding-left:17px; } .admin-filters { grid-template-columns:1fr 130px; } .admin-filters select:last-child { grid-column:2; } .admin-filters select:nth-child(2) { grid-column:2; grid-row:1; } .admin-metric { padding:12px; gap:10px; } .admin-metric-icon { width:45px; flex-basis:45px; height:45px; } }
 @media (max-width:1040px) { .admin-sidebar { width:74px; flex-basis:74px; } .admin-wordmark { font-size:16px !important; line-height:.93; letter-spacing:.03em; padding:25px 7px; text-align:center; min-height:104px; } .admin-wordmark .admin-accent { margin:0 auto 15px; width:35px; } .admin-sidebar nav { padding:14px 8px; } .admin-nav-item { padding:13px; justify-content:center; } .admin-nav-item span, .admin-nav-item small, .admin-sidebar-foot button, .admin-sidebar-foot span { display:none; } .admin-editor-layout { grid-template-columns:minmax(0,1fr) 300px; } .admin-metrics { grid-template-columns:repeat(2,1fr); } .admin-metrics.three { grid-template-columns:repeat(3,1fr); } .admin-dashboard-grid { grid-template-columns:1fr; } }
 @media (max-width:790px) { .admin-sidebar { position:fixed; width:250px; left:0; top:0; height:100vh; transform:translateX(-101%); transition:transform .2s; } .admin-sidebar.open { transform:translateX(0); } .admin-sidebar .admin-wordmark { text-align:left; font-size:31px !important; letter-spacing:.17em; padding:30px 30px; } .admin-sidebar nav { padding:14px 11px; } .admin-sidebar .admin-nav-item { justify-content:flex-start; } .admin-sidebar .admin-nav-item span { display:block; } .admin-sidebar-foot button, .admin-sidebar-foot span { display:flex; } .admin-mobile-scrim { display:block; position:fixed; inset:0; border:0; background:#0008; z-index:45; } .admin-topbar { padding:0 20px; min-height:62px; } .admin-menu-toggle { display:inline-flex; align-items:center; border:0; background:none; padding:5px; } .admin-location { margin-right:auto; } .admin-content { padding:22px 18px 55px; } .admin-editor-layout { grid-template-columns:1fr; } .admin-editor-panel { border:1px solid var(--adm-line); padding:20px; min-height:0; } .admin-filters { grid-template-columns:minmax(0,1fr) 150px; } .admin-chat-app { grid-template-columns:230px minmax(0,1fr); } }
 @media (max-width:550px) { .admin-top-actions { gap:7px; } .admin-top-actions > span:not(.admin-top-divider), .admin-top-actions > svg:last-child, .admin-top-actions .admin-top-divider { display:none; } .admin-location { font-size:10px; } .admin-page-title { align-items:flex-start; flex-direction:column; gap:15px; } .admin-page-title h1 { font-size:43px; } .admin-metrics, .admin-metrics.three { grid-template-columns:1fr 1fr; gap:9px; } .admin-metric { min-height:84px; } .admin-metric-icon { display:none; } .admin-metric strong { font-size:33px; } .admin-filters { grid-template-columns:1fr 1fr; } .admin-filters .admin-search { grid-column:1/-1; } .admin-filters select:nth-child(2), .admin-filters select:last-child { grid-column:auto; grid-row:auto; } .admin-quick-grid { grid-template-columns:1fr 1fr; } .admin-chat-app { display:flex; flex-direction:column; min-height:70vh; height:auto; } .admin-chat-list { height:170px; border-right:0; border-bottom:1px solid var(--adm-line); } .admin-chat-list h2 { padding:10px 15px; font-size:22px; } .admin-chat-list > button { padding:8px 14px; } .admin-chat-conversation { min-height:400px; } .admin-form-grid { grid-template-columns:1fr 1fr; } .admin-setting-row { align-items:flex-start; flex-direction:column; } }
+@media (max-width:900px) { .admin-calendar-week { grid-template-columns:repeat(7,minmax(148px,1fr)); } .admin-calendar-day-body { min-height:190px; } }
+@media (max-width:550px) { .admin-calendar-period { flex-wrap:wrap; } .admin-calendar-period strong { min-width:0; flex:1; } .admin-calendar-filters { width:100%; } .admin-calendar-filters label { flex:1; min-width:120px; } .admin-calendar-filters select { width:100%; min-width:0; } .admin-calendar-dialog { padding:26px 18px; } }

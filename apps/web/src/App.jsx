@@ -3,7 +3,9 @@ import { X } from 'lucide-react';
 import { api, currentUser } from './client';
 import { demoProducts, demoServices, demoStaff } from './data';
 import { CartDrawer, ChatWidget, Footer, Header } from './components';
-import { AccountPage, Booking, Home, Shop, StoryPage } from './pages';
+import { Home, Shop, StoryPage } from './pages';
+import BookingPage from './BookingPage';
+import ClientAccount from './ClientAccount';
 
 const AdminPortal = lazy(() => import('./admin/AdminPortal'));
 
@@ -40,8 +42,8 @@ export function App() {
     <Header path={path} navigate={navigate} cartCount={cartCount} openCart={() => setDrawerOpen(true)}/>
     {path === '/' && <Home navigate={navigate} products={products} addToCart={addToCart} chooseCategory={chooseCategory}/>}
     {path === '/shop' && <Shop products={products} addToCart={addToCart}/>}
-    {(path === '/book' || path === '/services') && <Booking services={services} staff={staff} activeCategory={category} setActiveCategory={setCategory} notify={notify} user={user} onBooked={onBooked}/>}
-    {path === '/account' && <AccountPage user={user} refreshUser={refreshUser} notify={notify} appointments={appointments}/>}
+    {(path === '/book' || path === '/services') && <BookingPage services={services} staff={staff} activeCategory={category} setActiveCategory={setCategory} notify={notify} user={user} onBooked={onBooked}/>}
+    {path === '/account' && <ClientAccount user={user} refreshUser={refreshUser} notify={notify} appointments={appointments} onAppointmentsChanged={onBooked}/>}
     {(path === '/about' || path === '/our-work') && <StoryPage path={path} navigate={navigate}/>}
     <Footer navigate={navigate}/>
     <ChatWidget user={user} notify={notify}/>
