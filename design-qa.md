@@ -27,7 +27,7 @@ Hybrid of the user's chosen concepts: editorial warm-ivory typography, deep oliv
 
 1. Complete desktop/mobile visual QA in a working browser and fix deviations from the approved composition.
 2. Replace placeholder products, staff, prices and brand imagery with salon-approved materials.
-3. Add full availability engine and operational workflows before taking real bookings or payments.
+3. Complete payment-provider and deployment end-to-end verification before taking real bookings or payments.
 
 This is a foundation-stage signoff only, not a production launch approval.
 
@@ -45,3 +45,12 @@ This is a foundation-stage signoff only, not a production launch approval.
 - Responsive breakpoint rules are provided for 1350px, 1040px, 790px and 550px. **Not visually verified in a browser yet.**
 - Copy exception: generated concept includes sample products and counts; runtime is data-driven and begins with three sample products.
 - Future QA must include screenshot inspection at 1536×1024 and 390×844, form interactions, and a five-point side-by-side comparison before public deployment.
+
+## Phase 4 scheduling and deposit updates
+
+- **Design references visually inspected:** `docs/approved-concept.webp` and `docs/admin-concept.webp`; approved warm ivory, olive, gold, and serif hierarchy retained. No new hero, product grid, page structure, or marketing copy was introduced.
+- **New UI:** `Admin → Scheduling` extends the established admin form/panel family with recurring break rows, date exceptions, and save actions. `Client → My appointments` adds a small existing-style Stripe deposit action only when server policy enables deposits. Changes were scoped to functional controls within existing views.
+- **Source-level comparison ledger:** (1) sidebar and icon treatment unchanged except one Scheduling link; (2) colors remain the existing olive/ivory system; (3) form labels/inputs follow admin editor styling; (4) deposit action uses account card borders/typography; (5) mobile rules collapse scheduling columns below 1050px, and deposit actions wrap.
+- **Functional checks:** API tests cover blocked breaks/holidays, preservation of booked appointments, lock/reuse of a deposit Checkout Session, rejected unsigned webhook and successful signed settlement. Production frontend build and static worker tests pass.
+- **Live visual QA:** **blocked in this environment.** Vite started successfully using `--host 127.0.0.1`, but local headless Chromium exited with `process_singleton_posix.cc: socket() failed: Operation not permitted`. The connected Browser plugin’s interactive tool was unavailable. No actual browser screenshot was captured. Fidelity cannot be certified at desktop or mobile viewport sizes until screenshots can be captured from a permitted browser.
+- **Before sign-off:** compare live 1536×1024 and 390×844 screenshots side-by-side with the relevant concepts; exercise specialist selection, recurring break saves, a closed holiday, booking, rescheduling, mobile account, admin scheduling layout, and Stripe test-mode checkout. This remains a preview, not a production design signoff.

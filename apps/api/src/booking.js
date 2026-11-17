@@ -43,6 +43,31 @@ export function occupiedSlots(startAt, durationMinutes) {
   return Array.from({ length: durationMinutes / SLOT_MINUTES }, (_, index) => new Date(start + index * SLOT_MINUTES * 60000).toISOString());
 }
 
+const minutes = (time) => { const [hours, mins] = time.split(':').map(Number); return hours * 60 + mins; };
+
+export function effectiveStaffSchedule(stylist, date) {
+  const exception = (stylist.exceptions || []).find((item) => item.date === date);
+  if (exception?.closed) return null;
+  const day = new Date(`${date}T12:00:00Z`).getUTCDay();
+  if (!exception && !(stylist.workDays || [1, 2, 3, 4, 5]).includes(day)) return null;
+  return {
+    startTime: exception?.startTime || stylist.startTime || '09:00',
+    endTime: exception?.endTime || stylist.endTime || '17:00',
+    breaks: exception?.breaks ?? stylist.breaks ?? [],
+  };
+}
+
+export function scheduleFitError(startAt, durationMinutes, stylist, timeZone = DEFAULT_TIME_ZONE) {
+  const parts = localParts(startAt, timeZone);
+  const schedule = effectiveStaffSchedule(stylist, parts.date);
+  if (!schedule) return 'The specialist is unavailable on this date.';
+  const start = parts.hour * 60 + parts.minute;
+  const end = start + durationMinutes;
+  if (start < minutes(schedule.startTime) || end > minutes(schedule.endTime)) return 'The treatment does not fit within the specialist’s working hours.';
+  if (schedule.breaks.some((pause) => start < minutes(pause.endTime) && minutes(pause.startTime) < end)) return 'The specialist is on break during this time.';
+  return null;
+}
+
 export function bookingError(startAt, service, stylist, options = {}) {
   const timeZone = options.timeZone || DEFAULT_TIME_ZONE;
   const leadMinutes = Number(options.leadMinutes ?? 60);
@@ -51,13 +76,7 @@ export function bookingError(startAt, service, stylist, options = {}) {
   if (start > Date.now() + MAX_BOOKING_DAYS * 86400000) return 'Appointments can only be booked up to 90 days ahead.';
   if (!service || service.active === false || !stylist || stylist.active === false || !stylist.specialties.includes(service.category)) return 'Choose an active service and specialist.';
   if (!occupiedSlots(startAt, service.durationMinutes).length) return 'Appointments must start on a 15-minute boundary.';
-  const parts = localParts(start, timeZone);
-  if (!(stylist.workDays || [1, 2, 3, 4, 5]).includes(parts.dayOfWeek)) return 'The specialist does not work on this date.';
-  const startMinutes = parts.hour * 60 + parts.minute;
-  const [openHour, openMinute] = (stylist.startTime || '09:00').split(':').map(Number);
-  const [closeHour, closeMinute] = (stylist.endTime || '17:00').split(':').map(Number);
-  if (startMinutes < openHour * 60 + openMinute || startMinutes + service.durationMinutes > closeHour * 60 + closeMinute) return 'The requested treatment does not fit within the specialist’s hours.';
-  return null;
+  return scheduleFitError(startAt, service.durationMinutes, stylist, timeZone);
 }
 
 export function overlaps(first, second) {
@@ -69,12 +88,13 @@ export function overlaps(first, second) {
 export function dailyAvailability({ service, stylist, date, appointments = [], timeZone = DEFAULT_TIME_ZONE, leadMinutes = 60, excludingId }) {
   const validDate = zonedToUtc(date, '12:00', timeZone);
   if (!validDate) return { date, timeZone, durationMinutes: service.durationMinutes, slots: [] };
-  const dayOfWeek = localParts(validDate, timeZone).dayOfWeek;
-  if (!(stylist.workDays || [1, 2, 3, 4, 5]).includes(dayOfWeek) || stylist.active === false || service.active === false || !stylist.specialties.includes(service.category)) return { date, timeZone, durationMinutes: service.durationMinutes, slots: [] };
-  const startMinutes = (stylist.startTime || '09:00').split(':').map(Number).reduce((h, m) => h * 60 + m);
-  const endMinutes = (stylist.endTime || '17:00').split(':').map(Number).reduce((h, m) => h * 60 + m);
+  const schedule = effectiveStaffSchedule(stylist, date);
+  if (!schedule || stylist.active === false || service.active === false || !stylist.specialties.includes(service.category)) return { date, timeZone, durationMinutes: service.durationMinutes, slots: [] };
+  const startMinutes = minutes(schedule.startTime);
+  const endMinutes = minutes(schedule.endTime);
   const slots = [];
   for (let minute = startMinutes; minute + service.durationMinutes <= endMinutes; minute += SLOT_MINUTES) {
+    if (schedule.breaks.some((pause) => minute < minutes(pause.endTime) && minutes(pause.startTime) < minute + service.durationMinutes)) continue;
     const hhmm = `${String(Math.floor(minute / 60)).padStart(2, '0')}:${String(minute % 60).padStart(2, '0')}`;
     const utc = zonedToUtc(date, hhmm, timeZone);
     if (!utc || utc.getTime() < Date.now() + leadMinutes * 60000 || utc.getTime() > Date.now() + MAX_BOOKING_DAYS * 86400000) continue;

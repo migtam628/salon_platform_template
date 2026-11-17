@@ -5,8 +5,9 @@ import Stripe from 'stripe';
 import { Client, Account } from 'node-appwrite';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { DEFAULT_TIME_ZONE, bookingError, dailyAvailability, localParts, occupiedSlots, zonedToUtc } from './booking.js';
+import { DEFAULT_TIME_ZONE, bookingError, dailyAvailability, localParts, occupiedSlots, scheduleFitError, zonedToUtc } from './booking.js';
 import { queueBookingEmails } from './notifications.js';
+import { depositAmountCents, depositPercent } from './deposits.js';
 
 const appointmentSchema = z.object({
   serviceId: z.string().min(1), staffId: z.string().min(1), startAt: z.iso.datetime(),
@@ -30,19 +31,44 @@ const serviceSchema = z.object({
   description: z.string().trim().max(600), active: z.boolean(),
 });
 const timeSchema = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/);
+const quarterTime = timeSchema.refine((value) => Number(value.slice(3)) % 15 === 0, 'Time must be on a 15-minute boundary.');
+const breakSchema = z.object({ startTime: quarterTime, endTime: quarterTime }).refine((item) => item.startTime < item.endTime, 'Break end must be later than its start.');
+const exceptionSchema = z.object({ date: z.iso.date(), closed: z.boolean(), startTime: quarterTime.optional(), endTime: quarterTime.optional(), breaks: z.array(breakSchema).max(8).optional() });
+function validateBreaks(breaks, startTime, endTime, ctx, path) {
+  for (const [index, pause] of breaks.entries()) {
+    if (pause.startTime < startTime || pause.endTime > endTime || breaks.some((other, i) => i !== index && pause.startTime < other.endTime && other.startTime < pause.endTime)) {
+      ctx.addIssue({ code: 'custom', message: 'Breaks must fit within hours and not overlap.', path: [...path, index] });
+    }
+  }
+}
 const staffSchema = z.object({
   name: z.string().trim().min(2).max(120), specialties: z.array(z.enum(['Hair', 'Nails', 'Beauty'])).min(1).max(3),
-  workDays: z.array(z.number().int().min(0).max(6)).min(1).max(7), startTime: timeSchema, endTime: timeSchema, active: z.boolean(),
-}).refine((value) => value.startTime < value.endTime, 'End time must be after start time.')
-  .refine((value) => [value.startTime, value.endTime].every((time) => Number(time.slice(3)) % 15 === 0), 'Working hours must be on 15-minute boundaries.');
+  workDays: z.array(z.number().int().min(0).max(6)).min(1).max(7), startTime: quarterTime, endTime: quarterTime, active: z.boolean(),
+  breaks: z.array(breakSchema).max(8).optional().default([]),
+  exceptions: z.array(exceptionSchema).max(100).optional().default([]),
+}).superRefine((value, ctx) => {
+  if (value.startTime >= value.endTime) ctx.addIssue({ code: 'custom', message: 'End time must be later than start time.', path: ['endTime'] });
+  validateBreaks(value.breaks, value.startTime, value.endTime, ctx, ['breaks']);
+  const seen = new Set();
+  for (const [index, exception] of value.exceptions.entries()) {
+    if (seen.has(exception.date)) ctx.addIssue({ code: 'custom', message: 'Only one override is allowed for each date.', path: ['exceptions', index, 'date'] });
+    seen.add(exception.date);
+    if (!exception.closed) {
+      if (!exception.startTime || !exception.endTime || exception.startTime >= exception.endTime) ctx.addIssue({ code: 'custom', message: 'Open dates require valid start and end hours.', path: ['exceptions', index] });
+      else validateBreaks(exception.breaks ?? value.breaks, exception.startTime, exception.endTime, ctx, ['exceptions', index, 'breaks']);
+    }
+  }
+});
 
-export function createApp({ store, config = process.env, onMessage = () => {} }) {
+export function createApp({ store, config = process.env, onMessage = () => {}, stripeClient = null }) {
   const app = express();
   const demo = config.DEMO_MODE === 'true';
   const timeZone = config.SALON_TIME_ZONE || DEFAULT_TIME_ZONE;
   new Intl.DateTimeFormat('en-US', { timeZone }); // Fail fast for invalid IANA time zones.
   const leadMinutes = Math.max(0, Number(config.BOOKING_MIN_LEAD_MINUTES || 60));
-  const stripe = config.STRIPE_SECRET_KEY ? new Stripe(config.STRIPE_SECRET_KEY) : null;
+  const stripe = stripeClient || (config.STRIPE_SECRET_KEY ? new Stripe(config.STRIPE_SECRET_KEY) : null);
+  const bookingDepositPercent = depositPercent(config);
+  if (bookingDepositPercent > 0 && !demo && (!stripe || !config.STRIPE_WEBHOOK_SECRET)) throw new Error('Appointment deposits require Stripe Checkout and a signed webhook.');
   async function notifyBooking(appointment, kind) {
     try { await queueBookingEmails(store, appointment, kind); }
     catch (error) { console.error(`Unable to queue appointment ${kind} notification:`, error.message); }
@@ -62,6 +88,12 @@ export function createApp({ store, config = process.env, onMessage = () => {} })
       if (['checkout.session.completed', 'checkout.session.async_payment_succeeded'].includes(event.type)) {
         const session = event.data.object;
         if (session.payment_status === 'paid' && session.metadata?.orderId) await store.markOrderPaid(session.metadata.orderId, session.payment_intent || '', session.customer_details?.email || session.customer_email);
+        if (session.payment_status === 'paid' && session.metadata?.paymentKind === 'appointment_deposit') {
+          if (session.currency !== 'usd' || !session.metadata?.appointmentId || !Number.isSafeInteger(session.amount_total)) throw new Error('Invalid appointment deposit payload.');
+          const booking = await store.getAppointment(session.metadata.appointmentId);
+          if (!booking || booking.depositCheckoutSessionId !== session.id) throw new Error('Appointment deposit Checkout Session did not match the pending payment.');
+          await store.markAppointmentDepositPaid(session.metadata.appointmentId, session.payment_intent || '', session.amount_total);
+        }
       }
       await store.recordEvent(event.id);
       res.json({ received: true });
@@ -129,7 +161,8 @@ export function createApp({ store, config = process.env, onMessage = () => {} })
       if (invalid) return res.status(400).json({ error: invalid });
       if (!demo && req.user.role !== 'admin' && input.customerEmail.toLowerCase() !== req.user.email.toLowerCase()) return res.status(403).json({ error: 'Use your signed-in account email for bookings.' });
       const bookingDate = localParts(input.startAt, timeZone).date;
-      const saved = await store.createAppointment({ ...input, id: randomUUID(), userId: req.user.id, serviceName: service.name, staffName: stylist.name, durationMinutes: service.durationMinutes, price: service.price, timeZone, bookingDate, occupiedSlots: occupiedSlots(input.startAt, service.durationMinutes), status: 'requested', createdAt: new Date().toISOString() });
+      const cents = depositAmountCents(service.price, bookingDepositPercent);
+      const saved = await store.createAppointment({ ...input, id: randomUUID(), userId: req.user.id, serviceName: service.name, staffName: stylist.name, durationMinutes: service.durationMinutes, price: service.price, timeZone, bookingDate, occupiedSlots: occupiedSlots(input.startAt, service.durationMinutes), status: 'requested', depositRequiredCents: cents, depositStatus: cents > 0 ? 'unpaid' : 'not-required', createdAt: new Date().toISOString() });
       await notifyBooking(saved, 'requested');
       res.status(201).json(saved);
     } catch (e) { next(e); }
@@ -167,6 +200,31 @@ export function createApp({ store, config = process.env, onMessage = () => {} })
       res.json(saved);
     } catch (e) { next(e); }
   });
+  app.post('/api/appointments/:id/deposit-checkout', authenticate, async (req, res, next) => {
+    try {
+      if (!bookingDepositPercent || !stripe || !config.STRIPE_WEBHOOK_SECRET) return res.status(503).json({ error: 'Appointment deposits are not enabled.' });
+      const appointment = await store.getAppointment(req.params.id);
+      if (!appointment) return res.status(404).json({ error: 'Appointment not found.' });
+      if (appointment.userId !== req.user.id && req.user.role !== 'admin') return res.status(403).json({ error: 'This appointment belongs to another customer.' });
+      if (!['requested', 'confirmed'].includes(appointment.status) || new Date(appointment.startAt).getTime() < Date.now()) return res.status(409).json({ error: 'This appointment can no longer accept a deposit.' });
+      if (appointment.depositStatus === 'paid') return res.status(409).json({ error: 'The appointment deposit has already been paid.' });
+      if (!Number.isSafeInteger(appointment.depositRequiredCents) || appointment.depositRequiredCents < 50) return res.status(409).json({ error: 'This appointment has no eligible deposit.' });
+      const attempt = await store.beginDepositCheckout(appointment.id);
+      if (attempt.state === 'reuse') return res.json({ url: attempt.url, reused: true });
+      if (attempt.state !== 'acquired') return res.status(409).json({ error: 'A payment session is already being prepared. Try again shortly.' });
+      try {
+        const base = config.PUBLIC_WEB_URL || 'http://localhost:5173';
+        const session = await stripe.checkout.sessions.create({ mode: 'payment', customer_email: appointment.customerEmail,
+          line_items: [{ price_data: { currency: 'usd', product_data: { name: `${appointment.serviceName} appointment deposit` }, unit_amount: appointment.depositRequiredCents }, quantity: 1 }],
+          success_url: `${base}/account?deposit=success`, cancel_url: `${base}/account?deposit=cancelled`,
+          metadata: { paymentKind: 'appointment_deposit', appointmentId: appointment.id },
+        }, { idempotencyKey: `salon-appointment-${appointment.id}-${attempt.token}` });
+        const recorded = await store.finishDepositCheckout(appointment.id, attempt.token, session);
+        if (!recorded) return res.status(409).json({ error: 'The appointment changed while checkout was being prepared. Please try again.' });
+        res.status(201).json({ url: session.url });
+      } catch (error) { await store.releaseDepositCheckout(appointment.id, attempt.token); throw error; }
+    } catch (error) { next(error); }
+  });
   app.get('/api/chat/:conversationId', authenticate, async (req, res, next) => {
     try {
       if (req.user.role !== 'admin' && req.params.conversationId !== req.user.id) return res.status(403).json({ error: 'Conversation is private.' });
@@ -196,6 +254,11 @@ export function createApp({ store, config = process.env, onMessage = () => {} })
     app.patch(`/api/admin/${kind}/:id`, authenticate, adminOnly, async (req, res, next) => {
       try {
         const input = schema.parse(req.body);
+        if (kind === 'staff') {
+          const activeBookings = await store.listStaffAppointments(req.params.id, new Date().toISOString(), new Date(Date.now() + 91 * 86400000).toISOString());
+          const blocked = activeBookings.find((booking) => ['requested', 'confirmed'].includes(booking.status) && (!input.active || scheduleFitError(booking.startAt, booking.durationMinutes || 60, input, timeZone)));
+          if (blocked) return res.status(409).json({ error: `This schedule change conflicts with an upcoming appointment for ${blocked.customerName}. Move or cancel the appointment first.` });
+        }
         const saved = await store.saveCatalogItem(kind, input, req.params.id);
         if (!saved) return res.status(404).json({ error: 'Record not found.' });
         res.json(saved);
@@ -224,6 +287,7 @@ export function createApp({ store, config = process.env, onMessage = () => {} })
   });
   app.get('/api/admin/integrations', authenticate, adminOnly, (_req, res) => res.json({
     payments: Boolean(stripe && config.STRIPE_WEBHOOK_SECRET),
+    appointmentDeposits: Boolean(bookingDepositPercent > 0 && stripe && config.STRIPE_WEBHOOK_SECRET),
     notifications: Boolean(config.RESEND_API_KEY && config.SALON_EMAIL_FROM),
     database: Boolean(config.MONGODB_URI),
     authentication: Boolean(config.APPWRITE_ENDPOINT && config.APPWRITE_PROJECT_ID),

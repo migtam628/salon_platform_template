@@ -7,7 +7,11 @@ const dayDate = (date) => new Date(`${date}T12:00:00Z`);
 const dateKey = (date) => date.toISOString().slice(0, 10);
 const addDays = (date, days) => { const value = dayDate(date); value.setUTCDate(value.getUTCDate() + days); return dateKey(value); };
 const startWeek = (date) => { const day = dayDate(date); day.setUTCDate(day.getUTCDate() - ((day.getUTCDay() + 6) % 7)); return dateKey(day); };
-const localDate = (value) => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(value));
+const localDate = (value) => {
+  const parts = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(new Date(value));
+  const fields = Object.fromEntries(parts.filter((part) => part.type !== 'literal').map((part) => [part.type, part.value]));
+  return `${fields.year}-${fields.month}-${fields.day}`;
+};
 const dateFor = (appointment) => appointment.bookingDate || localDate(appointment.startAt);
 const formatTime = (value, timeZone = 'America/New_York') => new Date(value).toLocaleTimeString('en-US', { timeZone, hour: 'numeric', minute: '2-digit' });
 const niceDay = (value) => dayDate(value).toLocaleDateString('en-US', { timeZone: 'UTC', weekday: 'short', day: 'numeric' });

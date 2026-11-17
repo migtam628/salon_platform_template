@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Bell, CalendarDays, ChevronDown, Home, Layers3, Menu, MessageCircle, Scissors, Settings2, ShoppingBag, Tag, UsersRound, X } from 'lucide-react';
+import { Bell, CalendarDays, CalendarOff, ChevronDown, Home, Layers3, Menu, MessageCircle, Scissors, Settings2, ShoppingBag, Tag, UsersRound, X } from 'lucide-react';
 import { api, demoMode } from '../client';
 import { Dashboard, InventoryManager, LiveChatManager, OrdersManager, ProductManager, ServiceManager, SettingsManager, TeamManager } from './screens';
 import BookingCalendar from './BookingCalendar';
+import SchedulingManager from './SchedulingManager';
 import './admin.css';
 
 const links = [
@@ -12,6 +13,7 @@ const links = [
   { slug: 'inventory', label: 'Inventory', icon: Layers3 },
   { slug: 'services', label: 'Services', icon: Scissors },
   { slug: 'team', label: 'Team', icon: UsersRound },
+  { slug: 'scheduling', label: 'Scheduling', icon: CalendarOff },
   { slug: 'orders', label: 'Orders', icon: ShoppingBag },
   { slug: 'chat', label: 'Live chat', icon: MessageCircle },
   { slug: 'settings', label: 'Settings', icon: Settings2 },
@@ -69,6 +71,7 @@ export default function AdminPortal({ path, navigate }) {
           {tab === 'inventory' && <InventoryManager data={data.inventory} onAdjust={adjustment}/>}
           {tab === 'services' && <ServiceManager services={data.services} onSave={(row, id) => mutate('services', row, id)}/>}
           {tab === 'team' && <TeamManager staff={data.staff} onSave={(row, id) => mutate('staff', row, id)}/>}
+          {tab === 'scheduling' && <SchedulingManager staff={data.staff} onSave={(row, id) => mutate('staff', row, id)} notify={setNotice}/>}
           {tab === 'orders' && <OrdersManager orders={data.orders} onStatus={updateOrder}/>}
           {tab === 'chat' && <LiveChatManager conversations={data.conversations} refresh={refresh} notify={setNotice}/>}
           {tab === 'settings' && <SettingsManager integrations={data.integrations} notifications={data.notifications}/>}

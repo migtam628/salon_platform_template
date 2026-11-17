@@ -1,9 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
+import Stripe from 'stripe';
 import { createApp } from '../src/app.js';
 import { MemoryStore } from '../src/store.js';
 import { occupiedSlots, overlaps, zonedToUtc } from '../src/booking.js';
+import { depositAmountCents, depositPercent } from '../src/deposits.js';
 
 async function availableSlot(url, serviceId = 'manicure', staffId = 'sofia', skip = 0) {
   for (let day = 2; day < 18; day++) {
@@ -14,8 +16,8 @@ async function availableSlot(url, serviceId = 'manicure', staffId = 'sofia', ski
   throw new Error('No availability found in test window.');
 }
 
-async function withServer(fn) {
-  const { app } = createApp({ store: new MemoryStore(), config: { DEMO_MODE: 'true', WEB_ORIGIN: 'http://localhost:5173' } });
+async function withServer(fn, overrides = {}) {
+  const { app } = createApp({ store: new MemoryStore(), config: { DEMO_MODE: 'true', WEB_ORIGIN: 'http://localhost:5173', ...overrides } });
   const server = createServer(app);
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   try { await fn(`http://127.0.0.1:${server.address().port}`); } finally { await new Promise((resolve) => server.close(resolve)); }
@@ -167,4 +169,93 @@ test('zoned time conversion rejects DST gaps and creates distinct 15-minute bloc
   assert.equal(occupiedSlots(first.startAt, first.durationMinutes).length, 3);
   assert.equal(overlaps(first, overlapping), true);
   assert.equal(overlaps(first, adjacent), false);
+});
+
+test('recurring breaks and individual closures remove public availability', async () => withServer(async (url) => {
+  const { date } = await availableSlot(url);
+  const admin = { 'content-type': 'application/json', 'x-demo-role': 'admin' };
+  const original = (await (await fetch(`${url}/api/admin/staff`, { headers: admin })).json()).find((p) => p.id === 'sofia');
+  const before = await (await fetch(`${url}/api/availability?serviceId=manicure&staffId=sofia&date=${date}`)).json();
+  const savedBreak = await fetch(`${url}/api/admin/staff/sofia`, { method: 'PATCH', headers: admin, body: JSON.stringify({ ...original, breaks: [{ startTime: '10:00', endTime: '11:00' }] }) });
+  assert.equal(savedBreak.status, 200);
+  const after = await (await fetch(`${url}/api/availability?serviceId=manicure&staffId=sofia&date=${date}`)).json();
+  assert.ok(after.slots.length < before.slots.length);
+  const closed = await fetch(`${url}/api/admin/staff/sofia`, { method: 'PATCH', headers: admin, body: JSON.stringify({ ...original, breaks: [], exceptions: [{ date, closed: true }] }) });
+  assert.equal(closed.status, 200);
+  const unavailable = await (await fetch(`${url}/api/availability?serviceId=manicure&staffId=sofia&date=${date}`)).json();
+  assert.equal(unavailable.slots.length, 0);
+}));
+
+test('staff schedule changes cannot invalidate upcoming reservations', async () => withServer(async (url) => {
+  const available = await availableSlot(url);
+  const admin = { 'content-type': 'application/json', 'x-demo-role': 'admin' };
+  const booked = await fetch(`${url}/api/appointments`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ serviceId: 'manicure', staffId: 'sofia', startAt: available.startAt, customerName: 'Salon Guest', customerEmail: 'guest@example.com' }) });
+  assert.equal(booked.status, 201);
+  const person = (await (await fetch(`${url}/api/admin/staff`, { headers: admin })).json()).find((p) => p.id === 'sofia');
+  const response = await fetch(`${url}/api/admin/staff/sofia`, { method: 'PATCH', headers: admin, body: JSON.stringify({ ...person, exceptions: [{ date: available.date, closed: true }] }) });
+  assert.equal(response.status, 409);
+}));
+
+test('deposit amounts and checkout attempts are server-managed', async () => {
+  assert.equal(depositPercent({ BOOKING_DEPOSIT_PERCENT: '25' }), 25);
+  assert.equal(depositAmountCents(45, 25), 1125);
+  assert.throws(() => depositPercent({ BOOKING_DEPOSIT_PERCENT: '125' }));
+  const store = new MemoryStore();
+  store.appointments.push({ id: 'deposit-test', status: 'requested', depositStatus: 'unpaid', depositRequiredCents: 1125 });
+  const first = await store.beginDepositCheckout('deposit-test');
+  assert.equal(first.state, 'acquired');
+  assert.equal((await store.beginDepositCheckout('deposit-test')).state, 'locked');
+  const session = { id: 'cs_test_booking', url: 'https://checkout.stripe.com/demo', expires_at: Math.round(Date.now() / 1000) + 3600 };
+  assert.equal(await store.finishDepositCheckout('deposit-test', first.token, session), true);
+  assert.equal((await store.beginDepositCheckout('deposit-test')).state, 'reuse');
+  await assert.rejects(store.markAppointmentDepositPaid('deposit-test', 'pi_test', 1200));
+  assert.equal((await store.markAppointmentDepositPaid('deposit-test', 'pi_test', 1125)).depositStatus, 'paid');
+  assert.equal((await store.beginDepositCheckout('deposit-test')).state, 'unavailable');
+});
+
+test('deposit checkout remains disabled until Stripe and policy are configured', async () => withServer(async (url) => {
+  const startAt = (await availableSlot(url)).startAt;
+  const booked = await (await fetch(`${url}/api/appointments`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ serviceId: 'manicure', staffId: 'sofia', startAt, customerName: 'Salon Guest', customerEmail: 'guest@example.com' }) })).json();
+  assert.equal(booked.depositRequiredCents, 1125);
+  assert.equal(booked.depositStatus, 'unpaid');
+  const response = await fetch(`${url}/api/appointments/${booked.id}/deposit-checkout`, { method: 'POST' });
+  assert.equal(response.status, 503);
+}, { BOOKING_DEPOSIT_PERCENT: '25' }));
+
+test('Stripe-hosted deposit checkout reuses sessions and only signed paid webhooks settle', async () => {
+  const store = new MemoryStore();
+  const stripe = new Stripe('sk_test_placeholder');
+  let created = 0;
+  stripe.checkout.sessions.create = async (_params, opts) => {
+    created++;
+    assert.match(opts.idempotencyKey, /^salon-appointment-/);
+    return { id: 'cs_test_booking', url: 'https://checkout.stripe.com/pay/test', expires_at: Math.ceil(Date.now() / 1000) + 3600 };
+  };
+  const secret = 'whsec_test_booking_signature';
+  const config = { DEMO_MODE: 'true', WEB_ORIGIN: 'http://localhost:5173', STRIPE_WEBHOOK_SECRET: secret, BOOKING_DEPOSIT_PERCENT: '25' };
+  const { app } = createApp({ store, config, stripeClient: stripe });
+  const server = createServer(app);
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const url = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const startAt = (await availableSlot(url)).startAt;
+    const booking = await (await fetch(`${url}/api/appointments`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ serviceId: 'manicure', staffId: 'sofia', startAt, customerName: 'Test Guest', customerEmail: 'test@example.com' }) })).json();
+    const checkoutUrl = `${url}/api/appointments/${booking.id}/deposit-checkout`;
+    const first = await fetch(checkoutUrl, { method: 'POST' });
+    assert.equal(first.status, 201);
+    assert.equal((await first.json()).url, 'https://checkout.stripe.com/pay/test');
+    const again = await fetch(checkoutUrl, { method: 'POST' });
+    assert.equal(again.status, 200);
+    assert.equal((await again.json()).reused, true);
+    assert.equal(created, 1);
+    const event = { id: 'evt_deposit_one', type: 'checkout.session.completed', data: { object: { id: 'cs_test_booking', payment_status: 'paid', currency: 'usd', amount_total: 1125, payment_intent: 'pi_deposit_one', metadata: { paymentKind: 'appointment_deposit', appointmentId: booking.id } } } };
+    const payload = JSON.stringify(event);
+    assert.equal((await fetch(`${url}/api/stripe/webhook`, { method: 'POST', headers: { 'content-type': 'application/json', 'stripe-signature': 'invalid' }, body: payload })).status, 400);
+    const header = stripe.webhooks.generateTestHeaderString({ payload, secret });
+    const result = await fetch(`${url}/api/stripe/webhook`, { method: 'POST', headers: { 'content-type': 'application/json', 'stripe-signature': header }, body: payload });
+    assert.equal(result.status, 200);
+    assert.equal((await store.getAppointment(booking.id)).depositStatus, 'paid');
+    const duplicate = await fetch(`${url}/api/stripe/webhook`, { method: 'POST', headers: { 'content-type': 'application/json', 'stripe-signature': header }, body: payload });
+    assert.equal((await duplicate.json()).duplicate, true);
+  } finally { await new Promise((resolve) => server.close(resolve)); }
 });

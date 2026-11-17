@@ -41,6 +41,33 @@ export class MemoryStore {
   async listAppointments(userId) { return clone(userId ? this.appointments.filter((a) => a.userId === userId) : this.appointments); }
   async listStaffAppointments(staffId, from, to) { return clone(this.appointments.filter((a) => a.staffId === staffId && a.startAt >= from && a.startAt < to)); }
   async getAppointment(id) { return clone(this.appointments.find((a) => a.id === id) || null); }
+  async beginDepositCheckout(id) {
+    const item = this.appointments.find((a) => a.id === id);
+    if (!item || !['requested', 'confirmed'].includes(item.status) || item.depositStatus !== 'unpaid') return { state: 'unavailable' };
+    const now = Date.now();
+    if (item.depositCheckoutUrl && Date.parse(item.depositCheckoutExpiresAt) > now + 60_000) return { state: 'reuse', url: item.depositCheckoutUrl };
+    if (Date.parse(item.depositCheckoutLockUntil || 0) > now) return { state: 'locked' };
+    const token = item.depositCheckoutSessionId ? randomUUID() : item.depositCheckoutToken || randomUUID();
+    Object.assign(item, { depositCheckoutToken: token, depositCheckoutLockUntil: new Date(now + 120_000).toISOString() });
+    return { state: 'acquired', token };
+  }
+  async finishDepositCheckout(id, token, session) {
+    const item = this.appointments.find((a) => a.id === id && a.depositCheckoutToken === token && a.depositStatus === 'unpaid');
+    if (!item) return false;
+    Object.assign(item, { depositCheckoutSessionId: session.id, depositCheckoutUrl: session.url, depositCheckoutExpiresAt: new Date(session.expires_at * 1000).toISOString() });
+    delete item.depositCheckoutLockUntil;
+    return true;
+  }
+  async releaseDepositCheckout(id, token) {
+    const item = this.appointments.find((a) => a.id === id && a.depositCheckoutToken === token);
+    if (item) delete item.depositCheckoutLockUntil;
+  }
+  async markAppointmentDepositPaid(id, paymentIntent, amountCents) {
+    const item = this.appointments.find((a) => a.id === id);
+    if (!item || item.depositRequiredCents !== amountCents) throw new Error('Appointment deposit payment does not match the recorded amount.');
+    if (item.depositStatus !== 'paid') Object.assign(item, { depositStatus: 'paid', depositPaymentIntent: paymentIntent, depositPaidAt: new Date().toISOString() });
+    return clone(item);
+  }
   async updateAppointment(id, status) {
     const item = this.appointments.find((a) => a.id === id);
     if (!item) return null;
@@ -154,6 +181,37 @@ export class MongoStore {
   async listAppointments(userId) { return this.db.collection('appointments').find(userId ? { userId } : {}, { projection: { _id: 0 } }).sort({ startAt: 1 }).toArray(); }
   async listStaffAppointments(staffId, from, to) { return this.db.collection('appointments').find({ staffId, startAt: { $gte: from, $lt: to } }, { projection: { _id: 0 } }).toArray(); }
   async getAppointment(id) { return this.db.collection('appointments').findOne({ id }, { projection: { _id: 0 } }); }
+  async beginDepositCheckout(id) {
+    const collection = this.db.collection('appointments');
+    const item = await this.getAppointment(id);
+    if (!item || !['requested', 'confirmed'].includes(item.status) || item.depositStatus !== 'unpaid') return { state: 'unavailable' };
+    const now = Date.now();
+    if (item.depositCheckoutUrl && Date.parse(item.depositCheckoutExpiresAt) > now + 60_000) return { state: 'reuse', url: item.depositCheckoutUrl };
+    if (Date.parse(item.depositCheckoutLockUntil || 0) > now) return { state: 'locked' };
+    const token = item.depositCheckoutSessionId ? randomUUID() : item.depositCheckoutToken || randomUUID();
+    const sessionFilter = item.depositCheckoutSessionId ? { depositCheckoutSessionId: item.depositCheckoutSessionId } : { depositCheckoutSessionId: { $exists: false } };
+    const updated = await collection.findOneAndUpdate({ id, status: { $in: ['requested', 'confirmed'] }, depositStatus: 'unpaid', ...sessionFilter,
+      $or: [{ depositCheckoutLockUntil: { $exists: false } }, { depositCheckoutLockUntil: { $lt: new Date(now).toISOString() } }] },
+    { $set: { depositCheckoutToken: token, depositCheckoutLockUntil: new Date(now + 120_000).toISOString() } }, { returnDocument: 'after' });
+    if (updated) return { state: 'acquired', token };
+    const latest = await this.getAppointment(id);
+    if (latest?.depositCheckoutUrl && Date.parse(latest.depositCheckoutExpiresAt) > now + 60_000) return { state: 'reuse', url: latest.depositCheckoutUrl };
+    return { state: 'locked' };
+  }
+  async finishDepositCheckout(id, token, session) {
+    const result = await this.db.collection('appointments').updateOne({ id, depositCheckoutToken: token, depositStatus: 'unpaid' }, {
+      $set: { depositCheckoutSessionId: session.id, depositCheckoutUrl: session.url, depositCheckoutExpiresAt: new Date(session.expires_at * 1000).toISOString() },
+      $unset: { depositCheckoutLockUntil: '' },
+    });
+    return result.matchedCount > 0;
+  }
+  async releaseDepositCheckout(id, token) { await this.db.collection('appointments').updateOne({ id, depositCheckoutToken: token }, { $unset: { depositCheckoutLockUntil: '' } }); }
+  async markAppointmentDepositPaid(id, paymentIntent, amountCents) {
+    const item = await this.getAppointment(id);
+    if (!item || item.depositRequiredCents !== amountCents) throw new Error('Appointment deposit payment does not match the recorded amount.');
+    await this.db.collection('appointments').updateOne({ id, depositStatus: 'unpaid' }, { $set: { depositStatus: 'paid', depositPaymentIntent: paymentIntent, depositPaidAt: new Date().toISOString() } });
+    return this.getAppointment(id);
+  }
   async updateAppointment(id, status) {
     try { return await this.db.collection('appointments').findOneAndUpdate({ id }, { $set: { status, updatedAt: new Date().toISOString() } }, { returnDocument: 'after', projection: { _id: 0 } }); }
     catch (error) { if (error.code === 11000) throw Object.assign(new Error('This appointment would overlap another booking.'), { status: 409 }); throw error; }
