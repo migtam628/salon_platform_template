@@ -18,10 +18,10 @@
 | Retail stock & refunds | Timed stock holds, signed settlement, inventory movements, full admin refunds, optional restock | MongoDB replica set for transactions; test-mode refund/return policy validation |
 | Operations & security | Fail-closed production config, request IDs and structured logs, rate limits, readiness endpoint, graceful shutdown, Docker Compose installer, GitHub CI, offline production preflight | Deployment to actual hosting, distributed edge limits, external-service acceptance tests, monitoring alerts |
 | Integration acceptance | Optional real Stripe/Appwrite connection checks; isolated MongoDB concurrency and refund tests **verified in GitHub Actions** | Actual private staging checkout, mail delivery, browser QA, owner sign-off |
-| Release verification | Node 22/24 tests, dedicated MongoDB CI, API container build/boot smoke test **all verified in GitHub Actions**; updated Actions runtime and pinned Ubuntu runner | Actual staging rollout, monitoring and rollback drill |
+| Release verification | Node 22/24 tests, dedicated MongoDB CI, API container smoke test, **full local Compose stack** all verified in GitHub Actions; pinned Ubuntu runner | Actual staging rollout, monitoring and rollback drill |
 
 > [!NOTE]
-> **Phase 9: reproducible Docker installation added.** The single-container API smoke test above is already verified. A new CI job now exercises the **full local stack** (MongoDB + API + Caddy frontend); check its latest GitHub Actions result before treating the new Compose path as verified.
+> **Phase 9: reproducible Docker installation verified.** [GitHub Actions run #10](https://github.com/migtam628/salon_platform_template/actions/runs/44322524356) passed all five jobs, including the **full local stack** (MongoDB replica set + API + Caddy storefront). Actual private staging, HTTPS domain and external providers still need hands-on verification.
 
 ## 1. Visual direction
 
@@ -441,7 +441,7 @@ The frontend dev server proxies `/api` and WebSocket requests to the API. Withou
 
 ### Production path
 
-The project includes a **non-root Node API container** (`apps/api/Dockerfile`), a built React/Caddy container (`apps/web/Dockerfile`), separate local/staging Compose configuration, a GitHub Actions test/build workflow, an offline production preflight, and an [illustrated production deployment runbook](docs/production-deployment.md). API image CI acceptance is verified. The full-stack Compose job is newly added and must pass before its installation path is marked verified; real production hosting is **not** verified.
+The project includes a **non-root Node API container** (`apps/api/Dockerfile`), a built React/Caddy container (`apps/web/Dockerfile`), separate local/staging Compose configuration, a GitHub Actions test/build workflow, an offline production preflight, and an [illustrated production deployment runbook](docs/production-deployment.md). API and **full-stack Compose CI acceptance are verified** in [run #10](https://github.com/migtam628/salon_platform_template/actions/runs/44322524356); real production hosting is **not** verified.
 
 ### Run tests
 

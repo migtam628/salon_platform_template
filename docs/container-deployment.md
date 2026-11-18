@@ -150,5 +150,5 @@ flowchart TD
 ### What is verified?
 
 - Existing CI has verified the standalone API Docker build and boot and the MongoDB transaction test harness.
-- The new Compose installation has a dedicated CI build/start/HTTP-smoke job. Inspect its current result before asserting the complete stack is verified.
+- The [verified Phase 9 GitHub Actions run](https://github.com/migtam628/salon_platform_template/actions/runs/44322524356) passed the complete local Compose build, startup and proxied HTTP smoke tests, alongside the API container, MongoDB transaction and Node/frontend jobs.
 - Production database recovery, external authentication, Stripe, email and customer-domain HTTPS remain **unverified** until a private staging test is completed.
