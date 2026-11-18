@@ -33,6 +33,7 @@ export class MemoryStore {
     this.notifications = [];
     this.processedEvents = new Set();
   }
+  async ping() { return true; }
   async listProducts(includeInactive = false) { return clone(includeInactive ? this.products : this.products.filter((p) => p.active !== false)); }
   async listServices(includeInactive = false) { return clone(includeInactive ? this.services : this.services.filter((s) => s.active !== false)); }
   async listStaff(includeInactive = false) { return clone(includeInactive ? this.staff : this.staff.filter((s) => s.active !== false)); }
@@ -229,6 +230,8 @@ export class MemoryStore {
 
 export class MongoStore {
   constructor(client, db) { this.client = client; this.db = db; }
+  async ping() { await this.db.command({ ping: 1 }); return true; }
+  async close() { await this.client.close(); }
   static async connect(uri, name) {
     const client = new MongoClient(uri);
     await client.connect();

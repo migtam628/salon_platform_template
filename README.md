@@ -3,7 +3,7 @@
 **A custom beauty, hair, and nail salon platform with a public storefront, customer accounts, appointment scheduling, an admin operations portal, real-time chat, and Stripe payments.**
 
 > [!IMPORTANT]
-> **Phase 5 development preview — not production-ready.** “Atelier Beauty,” its photos, product names, services, stylists, pricing, and editorial copy are demonstration content. The real salon must supply its brand, policies, personnel, and payment configuration before launch. This project is **independent of Shopify**.
+> **Phase 6 security/deployment foundation — not production-ready.** “Atelier Beauty,” its photos, product names, services, stylists, pricing, and editorial copy are demonstration content. The real salon must supply its brand, policies, personnel, and payment configuration before launch. This project is **independent of Shopify**.
 
 | Experience | Implemented | Needs configuration / additional work |
 | --- | --- | --- |
@@ -16,6 +16,7 @@
 | Notifications | Persistent outbox, updates and 24-hour reminders | Verified email sender and Resend API key |
 | Stripe service deposits | Configurable percentage, hosted checkout, signed webhook | Default **OFF**; salon policy and real test-mode verification |
 | Retail stock & refunds | Timed stock holds, signed settlement, inventory movements, full admin refunds, optional restock | MongoDB replica set for transactions; test-mode refund/return policy validation |
+| Operations & security | Fail-closed production config, request IDs and structured logs, rate limits, readiness endpoint, graceful shutdown, API container, GitHub CI | Deployment to actual hosting, distributed edge limits, external-service acceptance tests, monitoring alerts |
 
 ## 1. Visual direction
 
@@ -80,6 +81,22 @@ flowchart TB
     WS --> DB
 ```
 
+### Phase 6 security and operations layers
+
+```mermaid
+flowchart TD
+    Internet[Public HTTPS visitor] --> Edge[Trusted TLS proxy + shared rate limits]
+    Edge --> Checks[Origin, identity, validation and per-process rate limits]
+    Checks --> API[REST and WebSocket server]
+    API --> DB[(Transactional database)]
+    API --> Provider[Signed Stripe events and optional email]
+    Health[Uptime probe] --> Ready[Database readiness endpoint]
+    Ready --> DB
+    API --> Logs[Request IDs and structured logs]
+```
+
+The reverse proxy and database are **external deployment requirements**, not bundled local services. The in-process limiter adds a safety layer, but a multi-replica system also needs coordinated gateway-level protection. See the [production deployment runbook](docs/production-deployment.md) for config, network layout, failure recovery, and a real-service acceptance checklist.
+
 **Why this structure?** The UI never calculates authoritative prices or reserves appointments on its own. The API checks permissions, availability, and payment amounts; MongoDB stores durable operational records. Stripe collects card payments on hosted Checkout pages, keeping card data out of the salon app.
 
 | Layer | Technology | Responsibility |
@@ -106,6 +123,7 @@ salon_platform_template/
 │   │   │   ├── booking.js         # Working hours, holidays, breaks, slots
 │   │   │   ├── deposits.js        # Deposit configuration and calculation
 │   │   │   ├── notifications.js   # Email outbox and delivery worker
+│   │   │   ├── security.js        # Origin, config, request ID, throttling, logging
 │   │   │   └── seed.js            # Development-only salon data
 │   │   └── tests/                # API, booking, payment and email tests
 │   └── web/
@@ -123,7 +141,10 @@ salon_platform_template/
 │       └── worker/                # Static-hosting worker
 ├── docs/
 │   ├── approved-concept.webp      # Approved storefront concept
-│   └── admin-concept.webp         # Admin concept
+│   ├── admin-concept.webp         # Admin concept
+│   └── production-deployment.md   # Deployment and release runbook
+├── .github/workflows/ci.yml      # Node 22/24 tests and web build
+├── .dockerignore                 # Prevent secrets and test files entering image
 ├── .env.example                   # Configuration template (no secrets)
 └── README.md
 ```
@@ -326,6 +347,9 @@ Delivery is disabled unless **both** `RESEND_API_KEY` and a verified `SALON_EMAI
 - Admin access is determined server-side from trusted Appwrite user IDs (`ADMIN_USER_IDS`), not an untrusted browser role.
 - Preview role headers work **only** when local demo mode is enabled.
 - Never expose `DEMO_MODE=true` on a public deployment.
+- HTTP chat writes are throttled per signed-in customer; WebSocket typing indicators are throttled per connection, with a 16 KB Socket.IO message ceiling.
+- HTTP responses carry a generated `X-Request-ID`; production writes structured route/status/timing logs, without request bodies or tokens.
+- Deployment still requires HTTPS, correct admin allowlist, external edge limits for multi-instance hosting, and documented salon privacy and retention policies.
 
 ## 9. Run locally
 
@@ -345,6 +369,10 @@ npm install
 
 The frontend dev server proxies `/api` and WebSocket requests to the API. Without `MONGODB_URI`, the demo uses an in-memory database: restarting the backend removes changes. With Appwrite configured and demo disabled, sign-in and permissions use real account sessions.
 
+### Production path
+
+The project now includes a **non-root Node API container** (`apps/api/Dockerfile`), a GitHub Actions test/build workflow, and an [illustrated production deployment runbook](docs/production-deployment.md) with an HTTPS reverse-proxy example, health monitoring, provider test matrix and recovery procedures. These are starting points for a real hosting environment; the container and live Stripe/Appwrite/MongoDB flows have **not** been deployed or verified here.
+
 ### Run tests
 
 ```bash
@@ -352,7 +380,7 @@ npm test
 npm run build
 ```
 
-The test suite checks API authorization, booking conflicts, staff scheduling, rescheduling/cancellation, Stripe configuration safeguards, deposit calculations and checkout state, retail stock holds, exact signed Stripe settlement, expiry cleanup, account-scoped order history, refund authorization/idempotency, one-time restocking, notification behavior, frontend compilation, and the static-hosting worker. Mocked provider tests do **not** replace a live Stripe test-mode transaction, a MongoDB replica-set integration test, or manual browser QA.
+The test suite checks API authorization, booking conflicts, staff scheduling, rescheduling/cancellation, Stripe configuration safeguards, deposit calculations and checkout state, retail stock holds, exact signed Stripe settlement, expiry cleanup, account-scoped order history, refund authorization/idempotency, one-time restocking, notification behavior, production configuration guardrails, readiness behavior, origin allowlists, API throttling, frontend compilation, and the static-hosting worker. GitHub CI runs the suite under Node 22 and 24. Mocked provider tests do **not** replace a live Stripe test-mode transaction, a MongoDB replica-set integration test, or manual browser QA.
 
 ## 10. Environment configuration
 
@@ -361,9 +389,17 @@ All supported entries are in [`.env.example`](.env.example). Never commit `.env`
 | Variable | Purpose | Default / requirement |
 | --- | --- | --- |
 | `PORT` | Express server | `4000` |
+| `NODE_ENV` | Production security validation and request logs | `development`; set `production` on live API |
 | `WEB_ORIGIN` | Allowed CORS origins | Local Vite URL |
 | `PUBLIC_WEB_URL` | Stripe redirect origin | Local Vite URL |
 | `DEMO_MODE` | Development-only preview identities/data | `true` locally; **false in production** |
+| `TRUST_PROXY_HOPS` | Trusted reverse proxy hop count for caller IP | `0` (set only with a secured trusted proxy) |
+| `ACCESS_LOGS` | Structured request logs without payloads | `false` locally; automatically on in production |
+| `PUBLIC_RATE_LIMIT_MAX` | Generic `/api` calls per IP per minute | `300` |
+| `BOOKING_RATE_LIMIT_MAX` | Booking writes per user per 15 minutes | `15` |
+| `CHECKOUT_RATE_LIMIT_MAX` | Checkout attempts per user/IP per 15 minutes | `10` |
+| `CHAT_RATE_LIMIT_MAX` | Chat posts per user per minute | `30` |
+| `ADMIN_WRITE_RATE_LIMIT_MAX` | Admin mutations per admin per minute | `60` |
 | `MONGODB_URI`, `MONGODB_DB` | Persistent documents, indexes, outbox | Required for production |
 | `APPWRITE_ENDPOINT`, `APPWRITE_PROJECT_ID` | JWT-backed customer authentication | Required for production |
 | `ADMIN_USER_IDS` | Trusted comma-separated admin account IDs | Configure before production |
@@ -389,6 +425,7 @@ All routes begin with `/api`. Customer appointment and private chat routes requi
 | Method | Endpoint | Description |
 | --- | --- | --- |
 | GET | `/health` | API availability and safe configuration flags |
+| GET | `/ready` | Backing database ping; `503` if unavailable, excluded from generic public rate limits |
 | GET | `/products`, `/services`, `/staff` | Public active catalog and team |
 | GET | `/availability?serviceId=&staffId=&date=` | Live opening times for a specialist/service/date |
 | GET | `/appointments` | Customer’s bookings; all bookings for admins |
@@ -464,7 +501,8 @@ Use this checklist before giving the site to real paying customers:
 - [x] Implement inventory holds/settlement, pickup tracking, account-linked orders, and admin full-refund foundation (mocked API tests).
 - [ ] Configure real pickup address/contact/policies, taxes, compliant receipts, shipping if offered, and partial-refund/return process.
 - [ ] Test production MongoDB transactions and live Stripe **test-mode** checkout/expiration/refund webhook timing, including failed and delayed events.
-- [ ] Add rate limiting, stronger audit logs, monitoring, backups, retry visibility, and deployment health checks.
+- [x] Add per-process rate limiting, request tracing, structured logs, database readiness checks and container/CI foundation.
+- [ ] Add shared distributed edge rate limits, durable business audit trail, alerting integrations, tested backups and restore drills.
 - [ ] Run API tests, production build, hosting tests, mobile/desktop browser QA, accessibility checks, and transactional end-to-end tests.
 - [ ] Review webhook delivery/replay behavior and test server restarts during checkout and notification delivery.
 - [ ] Get final sign-off from the salon owner before taking live payments.
@@ -478,7 +516,7 @@ Use this checklist before giving the site to real paying customers:
 | 3 | Live schedule, customer rescheduling/cancellation, weekly admin calendar, email outbox | Implemented preview |
 | 4 | Staff breaks/holidays/special dates and configurable appointment deposit collection | Implemented preview |
 | 5 | Retail pickup desk, transactional stock reservations, customer order history, full refunds | Implemented preview |
-| 6 | Security hardening, real-provider end-to-end tests, monitoring, deployment | Planned |
+| 6 | Security guards, readiness, logs, abuse throttling, Docker/CI and deployment runbook | Foundation implemented; external provider tests and deployment outstanding |
 
 ### Important limitations
 

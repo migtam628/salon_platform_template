@@ -57,6 +57,14 @@ test('retail cart deduplicates product IDs and reserves stock without oversellin
   assert.equal((await json('/admin/inventory/balm/adjust', 'POST', { delta: -2, reason: 'Physical recount' }, true)).status, 409);
 }));
 
+test('checkout throttling prevents additional Stripe sessions and inventory reservations', async () => fixture(async ({ checkout, store, sessions }) => {
+  assert.equal((await checkout([{ productId: 'balm', quantity: 1 }])).status, 201);
+  assert.equal((await checkout([{ productId: 'balm', quantity: 1 }])).status, 429);
+  assert.equal(sessions.length, 1);
+  assert.equal((await store.listProducts()).find((item) => item.id === 'balm').reserved, 1);
+  assert.equal((await store.listOrders()).length, 1);
+}, { CHECKOUT_RATE_LIMIT_MAX: '1' }));
+
 test('signed Stripe payment consumes reserved inventory exactly once and exposes linked history', async () => fixture(async ({ store, sessions, json, checkout, pay, webhook }) => {
   assert.equal((await checkout([{ productId: 'shampoo', quantity: 2 }, { productId: 'oil', quantity: 1 }])).status, 201);
   const order = (await store.listOrders())[0];

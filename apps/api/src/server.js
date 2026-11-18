@@ -5,15 +5,14 @@ import { Client, Account } from 'node-appwrite';
 import { MemoryStore, MongoStore } from './store.js';
 import { createApp } from './app.js';
 import { processDueEmails } from './notifications.js';
+import { validateRuntimeConfig } from './security.js';
 
 const config = process.env;
-if (config.NODE_ENV === 'production' && (config.DEMO_MODE === 'true' || !config.MONGODB_URI || !config.APPWRITE_ENDPOINT || !config.APPWRITE_PROJECT_ID)) {
-  throw new Error('Production requires MongoDB and Appwrite authentication, and DEMO_MODE must be disabled.');
-}
+const origins = validateRuntimeConfig(config);
 const store = config.MONGODB_URI ? await MongoStore.connect(config.MONGODB_URI, config.MONGODB_DB || 'salon_platform') : new MemoryStore();
 const { app } = createApp({ store, config, onMessage: (message) => io.to(`conversation:${message.conversationId}`).emit('chat:message', message) });
 const server = createServer(app);
-const io = new Server(server, { cors: { origin: config.WEB_ORIGIN?.split(',') || 'http://localhost:5173' } });
+const io = new Server(server, { cors: { origin: origins }, maxHttpBufferSize: 16 * 1024 });
 
 io.use(async (socket, next) => {
   if (config.DEMO_MODE === 'true') {
@@ -28,13 +27,20 @@ io.use(async (socket, next) => {
   } catch { next(new Error('Unauthorized WebSocket connection')); }
 });
 io.on('connection', (socket) => {
+  let typingWindow = { start: Date.now(), count: 0 };
   socket.on('chat:join', (conversationId, acknowledge) => {
-    if (typeof conversationId !== 'string' || conversationId.length > 100 || (socket.data.user.role !== 'admin' && conversationId !== socket.data.user.id)) return acknowledge?.({ ok: false });
+    const reply = typeof acknowledge === 'function' ? acknowledge : () => {};
+    if (typeof conversationId !== 'string' || conversationId.length < 2 || conversationId.length > 100 || (socket.data.user.role !== 'admin' && conversationId !== socket.data.user.id)) return reply({ ok: false });
     socket.join(`conversation:${conversationId}`);
-    acknowledge?.({ ok: true });
+    reply({ ok: true });
   });
   socket.on('chat:typing', (conversationId) => {
-    if (typeof conversationId === 'string' && (socket.data.user.role === 'admin' || conversationId === socket.data.user.id)) socket.to(`conversation:${conversationId}`).emit('chat:typing', { conversationId, role: socket.data.user.role });
+    const now = Date.now();
+    if (now - typingWindow.start >= 10_000) typingWindow = { start: now, count: 0 };
+    if (++typingWindow.count > 15) return;
+    if (typeof conversationId === 'string' && conversationId.length >= 2 && conversationId.length <= 100 && (socket.data.user.role === 'admin' || conversationId === socket.data.user.id)) {
+      socket.to(`conversation:${conversationId}`).emit('chat:typing', { conversationId, role: socket.data.user.role });
+    }
   });
 });
 
@@ -43,6 +49,7 @@ server.listen(Number(config.PORT || 4000), () => console.log(`Salon API listenin
 const inventoryTimer = setInterval(() => store.releaseExpiredOrders().catch((error) => console.error('Retail stock reservation cleanup failed:', error.message)), 60_000);
 inventoryTimer.unref();
 store.releaseExpiredOrders().catch((error) => console.error('Initial retail reservation cleanup failed:', error.message));
+let notificationTimer;
 if (config.RESEND_API_KEY && config.SALON_EMAIL_FROM) {
   let inProgress = false;
   const poll = async () => {
@@ -52,7 +59,30 @@ if (config.RESEND_API_KEY && config.SALON_EMAIL_FROM) {
     catch (error) { console.error('Notification worker failed:', error.message); }
     finally { inProgress = false; }
   };
-  const timer = setInterval(poll, 30_000);
-  timer.unref();
+  notificationTimer = setInterval(poll, 30_000);
+  notificationTimer.unref();
   poll();
 }
+
+let stopping = false;
+async function shutdown(signal) {
+  if (stopping) return;
+  stopping = true;
+  console.info(JSON.stringify({ event: 'server.shutdown', signal }));
+  clearInterval(inventoryTimer);
+  if (notificationTimer) clearInterval(notificationTimer);
+  const timeout = setTimeout(() => {
+    console.error('Shutdown timed out.');
+    process.exit(1);
+  }, 15_000);
+  timeout.unref();
+  try {
+    await new Promise((resolve) => io.close(resolve));
+    await store.close?.();
+  } catch (error) {
+    console.error('Graceful shutdown failed:', error.message);
+    process.exitCode = 1;
+  } finally { clearTimeout(timeout); }
+}
+process.once('SIGTERM', () => shutdown('SIGTERM'));
+process.once('SIGINT', () => shutdown('SIGINT'));

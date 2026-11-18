@@ -8,6 +8,7 @@ import { z } from 'zod';
 import { DEFAULT_TIME_ZONE, bookingError, dailyAvailability, localParts, occupiedSlots, scheduleFitError, zonedToUtc } from './booking.js';
 import { queueBookingEmails } from './notifications.js';
 import { depositAmountCents, depositPercent } from './deposits.js';
+import { accessLog, proxyHops, rateLimiter, requestId, validateRuntimeConfig } from './security.js';
 
 const appointmentSchema = z.object({
   serviceId: z.string().min(1), staffId: z.string().min(1), startAt: z.iso.datetime(),
@@ -68,6 +69,8 @@ const staffSchema = z.object({
 
 export function createApp({ store, config = process.env, onMessage = () => {}, stripeClient = null }) {
   const app = express();
+  const origins = validateRuntimeConfig(config);
+  app.set('trust proxy', proxyHops(config));
   const demo = config.DEMO_MODE === 'true';
   const timeZone = config.SALON_TIME_ZONE || DEFAULT_TIME_ZONE;
   new Intl.DateTimeFormat('en-US', { timeZone }); // Fail fast for invalid IANA time zones.
@@ -80,11 +83,20 @@ export function createApp({ store, config = process.env, onMessage = () => {}, s
     catch (error) { console.error(`Unable to queue appointment ${kind} notification:`, error.message); }
   }
   app.disable('x-powered-by');
+  app.use(requestId);
+  if (config.NODE_ENV === 'production' || config.ACCESS_LOGS === 'true') app.use(accessLog);
   app.use(helmet());
-  app.use(cors({ origin: config.WEB_ORIGIN?.split(',') || 'http://localhost:5173' }));
+  app.use(cors({ origin: origins }));
+
+  const publicLimiter = rateLimiter({ max: Number(config.PUBLIC_RATE_LIMIT_MAX || 300), windowMs: 60_000, label: 'public' });
+  const readinessLimiter = rateLimiter({ max: 60, windowMs: 60_000, label: 'readiness', key: (req) => req.ip });
+  const bookingLimiter = rateLimiter({ max: Number(config.BOOKING_RATE_LIMIT_MAX || 15), windowMs: 15 * 60_000, label: 'booking' });
+  const checkoutLimiter = rateLimiter({ max: Number(config.CHECKOUT_RATE_LIMIT_MAX || 10), windowMs: 15 * 60_000, label: 'checkout' });
+  const chatLimiter = rateLimiter({ max: Number(config.CHAT_RATE_LIMIT_MAX || 30), windowMs: 60_000, label: 'chat' });
+  const adminWriteLimiter = rateLimiter({ max: Number(config.ADMIN_WRITE_RATE_LIMIT_MAX || 60), windowMs: 60_000, label: 'admin write' });
 
   // Stripe signs the raw bytes; JSON parsing must not happen before signature validation.
-  app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+  app.post('/api/stripe/webhook', express.raw({ type: 'application/json', limit: '256kb' }), async (req, res) => {
     if (!stripe || !config.STRIPE_WEBHOOK_SECRET) return res.status(503).json({ error: 'Stripe is not configured.' });
     let event;
     try { event = stripe.webhooks.constructEvent(req.body, req.headers['stripe-signature'], config.STRIPE_WEBHOOK_SECRET); }
@@ -110,11 +122,20 @@ export function createApp({ store, config = process.env, onMessage = () => {}, s
       }
       await store.recordEvent(event.id);
       res.json({ received: true });
-    } catch (error) { console.error('Webhook persistence error:', error); res.status(500).json({ error: 'Webhook processing failed.' }); }
+    } catch (error) {
+      console.error(JSON.stringify({ event: 'stripe.webhook.failure', requestId: req.requestId, eventId: event.id, eventType: event.type, message: error.message }));
+      res.status(500).json({ error: 'Webhook processing failed.' });
+    }
   });
 
   app.use(express.json({ limit: '32kb' }));
   app.get('/api/health', (_req, res) => res.json({ ok: true, demo, paymentsConfigured: Boolean(stripe && config.STRIPE_WEBHOOK_SECRET) }));
+  app.get('/api/ready', readinessLimiter, async (_req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    try { await store.ping(); res.json({ ok: true }); }
+    catch { res.status(503).json({ ok: false }); }
+  });
+  app.use('/api', publicLimiter);
   app.get('/api/products', async (_req, res, next) => { try { res.json(await store.listProducts()); } catch (e) { next(e); } });
   app.get('/api/services', async (_req, res, next) => { try { res.json(await store.listServices()); } catch (e) { next(e); } });
   app.get('/api/staff', async (_req, res, next) => { try { res.json(await store.listStaff()); } catch (e) { next(e); } });
@@ -167,7 +188,7 @@ export function createApp({ store, config = process.env, onMessage = () => {}, s
       res.json(await slotData(appointment.serviceId, appointment.staffId, date, appointment.id));
     } catch (e) { next(e); }
   });
-  app.post('/api/appointments', authenticate, async (req, res, next) => {
+  app.post('/api/appointments', authenticate, bookingLimiter, async (req, res, next) => {
     try {
       const input = appointmentSchema.parse(req.body);
       const [services, staff] = await Promise.all([store.listServices(), store.listStaff()]);
@@ -184,7 +205,7 @@ export function createApp({ store, config = process.env, onMessage = () => {}, s
       res.status(201).json(saved);
     } catch (e) { next(e); }
   });
-  app.patch('/api/appointments/:id', authenticate, async (req, res, next) => {
+  app.patch('/api/appointments/:id', authenticate, bookingLimiter, async (req, res, next) => {
     try {
       const { startAt } = appointmentTimeSchema.parse(req.body);
       const appointment = await store.getAppointment(req.params.id);
@@ -205,7 +226,7 @@ export function createApp({ store, config = process.env, onMessage = () => {}, s
       res.json(saved);
     } catch (e) { next(e); }
   });
-  app.post('/api/appointments/:id/cancel', authenticate, async (req, res, next) => {
+  app.post('/api/appointments/:id/cancel', authenticate, bookingLimiter, async (req, res, next) => {
     try {
       const appointment = await store.getAppointment(req.params.id);
       if (!appointment) return res.status(404).json({ error: 'Appointment not found.' });
@@ -217,7 +238,7 @@ export function createApp({ store, config = process.env, onMessage = () => {}, s
       res.json(saved);
     } catch (e) { next(e); }
   });
-  app.post('/api/appointments/:id/deposit-checkout', authenticate, async (req, res, next) => {
+  app.post('/api/appointments/:id/deposit-checkout', authenticate, checkoutLimiter, async (req, res, next) => {
     try {
       if (!bookingDepositPercent || !stripe || !config.STRIPE_WEBHOOK_SECRET) return res.status(503).json({ error: 'Appointment deposits are not enabled.' });
       const appointment = await store.getAppointment(req.params.id);
@@ -248,7 +269,7 @@ export function createApp({ store, config = process.env, onMessage = () => {}, s
       res.json(await store.listMessages(req.params.conversationId));
     } catch (e) { next(e); }
   });
-  app.post('/api/chat', authenticate, async (req, res, next) => {
+  app.post('/api/chat', authenticate, chatLimiter, async (req, res, next) => {
     try {
       const input = messageSchema.parse(req.body);
       if (req.user.role !== 'admin' && input.conversationId !== req.user.id) return res.status(403).json({ error: 'Conversation is private.' });
@@ -261,14 +282,14 @@ export function createApp({ store, config = process.env, onMessage = () => {}, s
   const catalogDefinitions = { products: productSchema, services: serviceSchema, staff: staffSchema };
   for (const [kind, schema] of Object.entries(catalogDefinitions)) {
     app.get(`/api/admin/${kind}`, authenticate, adminOnly, async (_req, res, next) => { try { res.json(await store[`list${kind[0].toUpperCase()}${kind.slice(1)}`](true)); } catch (e) { next(e); } });
-    app.post(`/api/admin/${kind}`, authenticate, adminOnly, async (req, res, next) => {
+    app.post(`/api/admin/${kind}`, authenticate, adminOnly, adminWriteLimiter, async (req, res, next) => {
       try {
         const input = (kind === 'products' ? productCreateSchema : schema).parse(req.body);
         const saved = await store.saveCatalogItem(kind, { ...input, id: randomUUID() });
         res.status(201).json(saved);
       } catch (e) { next(e); }
     });
-    app.patch(`/api/admin/${kind}/:id`, authenticate, adminOnly, async (req, res, next) => {
+    app.patch(`/api/admin/${kind}/:id`, authenticate, adminOnly, adminWriteLimiter, async (req, res, next) => {
       try {
         const input = schema.parse(req.body);
         if (kind === 'staff') {
@@ -285,7 +306,7 @@ export function createApp({ store, config = process.env, onMessage = () => {}, s
   app.get('/api/admin/inventory', authenticate, adminOnly, async (_req, res, next) => {
     try { const [products, movements] = await Promise.all([store.listProducts(true), store.listInventoryMovements()]); res.json({ products, movements }); } catch (e) { next(e); }
   });
-  app.post('/api/admin/inventory/:id/adjust', authenticate, adminOnly, async (req, res, next) => {
+  app.post('/api/admin/inventory/:id/adjust', authenticate, adminOnly, adminWriteLimiter, async (req, res, next) => {
     try {
       const { delta, reason } = z.object({ delta: z.number().int().min(-100000).max(100000).refine((n) => n !== 0), reason: z.string().trim().min(3).max(200) }).parse(req.body);
       const saved = await store.adjustInventory(req.params.id, delta, reason, req.user.id);
@@ -295,7 +316,7 @@ export function createApp({ store, config = process.env, onMessage = () => {}, s
   });
   app.get('/api/admin/orders', authenticate, adminOnly, async (_req, res, next) => { try { res.json(await store.listOrders()); } catch (e) { next(e); } });
   app.get('/api/orders', authenticate, async (req, res, next) => { try { res.json(await store.listOrders(req.user.id)); } catch (e) { next(e); } });
-  app.patch('/api/admin/orders/:id/fulfillment', authenticate, adminOnly, async (req, res, next) => {
+  app.patch('/api/admin/orders/:id/fulfillment', authenticate, adminOnly, adminWriteLimiter, async (req, res, next) => {
     try {
       const { fulfillmentStatus } = z.object({ fulfillmentStatus: z.enum(['unfulfilled', 'processing', 'fulfilled']) }).parse(req.body);
       const saved = await store.updateOrderFulfillment(req.params.id, fulfillmentStatus);
@@ -303,7 +324,7 @@ export function createApp({ store, config = process.env, onMessage = () => {}, s
       res.json(saved);
     } catch (e) { next(e); }
   });
-  app.post('/api/admin/orders/:id/refund', authenticate, adminOnly, async (req, res, next) => {
+  app.post('/api/admin/orders/:id/refund', authenticate, adminOnly, adminWriteLimiter, async (req, res, next) => {
     try {
       if (!stripe || !config.STRIPE_WEBHOOK_SECRET) return res.status(503).json({ error: 'Stripe refunds are not configured.' });
       const { restock } = z.object({ restock: z.boolean().default(false) }).parse(req.body);
@@ -328,7 +349,7 @@ export function createApp({ store, config = process.env, onMessage = () => {}, s
     try { res.json({ configured: Boolean(config.RESEND_API_KEY && config.SALON_EMAIL_FROM), counts: await store.notificationStats() }); }
     catch (error) { next(error); }
   });
-  app.patch('/api/admin/appointments/:id', authenticate, adminOnly, async (req, res, next) => {
+  app.patch('/api/admin/appointments/:id', authenticate, adminOnly, adminWriteLimiter, async (req, res, next) => {
     try {
       const input = z.object({ status: z.enum(['requested', 'confirmed', 'completed', 'cancelled']) }).parse(req.body);
       const previous = await store.getAppointment(req.params.id);
@@ -343,7 +364,7 @@ export function createApp({ store, config = process.env, onMessage = () => {}, s
       res.json(result);
     } catch (e) { next(e); }
   });
-  app.post('/api/checkout', optionalAuthenticate, async (req, res, next) => {
+  app.post('/api/checkout', optionalAuthenticate, checkoutLimiter, async (req, res, next) => {
     try {
       if (!stripe || !config.STRIPE_WEBHOOK_SECRET) return res.status(503).json({ error: 'Stripe checkout is not configured yet.' });
       const { items } = cartSchema.parse(req.body);
@@ -377,8 +398,8 @@ export function createApp({ store, config = process.env, onMessage = () => {}, s
 
   app.use((error, _req, res, _next) => {
     if (error instanceof z.ZodError) return res.status(400).json({ error: 'Please review the submitted information.', details: error.issues.map((i) => ({ field: i.path.join('.'), message: i.message })) });
-    if (!error.status || error.status >= 500) console.error(error);
-    res.status(error.status || 500).json({ error: error.status ? error.message : 'Internal server error.' });
+    if (!error.status || error.status >= 500) console.error(JSON.stringify({ event: 'http.error', requestId: _req.requestId, message: error.message }));
+    res.status(error.status || 500).json({ error: error.status && error.status < 500 ? error.message : 'Internal server error.' });
   });
   return { app, authenticate, demo };
 }
