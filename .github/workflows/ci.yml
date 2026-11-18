@@ -15,7 +15,7 @@ concurrency:
 jobs:
   test-and-build:
     name: Test, build, and validate web hosting
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -33,7 +33,7 @@ jobs:
         run: npm test
   mongo-integration:
     name: MongoDB replica-set transaction acceptance
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
@@ -50,7 +50,7 @@ jobs:
         run: npm run test:integration -w @salon/api
   api-container:
     name: Build and smoke test production API image
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7

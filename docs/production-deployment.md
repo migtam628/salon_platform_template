@@ -90,7 +90,7 @@ docker run -d --name salon-api --restart unless-stopped \
   -p 127.0.0.1:4000:4000 salon-api:local
 ```
 
-The `apps/api/Dockerfile` is a build artifact; the container has no local MongoDB bundled and requires real services. Phase 8 adds an isolated GitHub Actions job that builds this image and boots it without external credentials, verifying non-root startup and `/api/health` and `/api/ready` using in-memory demo data. This proves build and boot only; it cannot validate MongoDB or Appwrite production wiring. Check the actual Actions job outcome before marking this verification complete.
+The `apps/api/Dockerfile` is a build artifact; the container has no local MongoDB bundled and requires real services. The [verified Phase 8 CI run](https://github.com/migtam628/salon_platform_template/actions/runs/44317396855) built the image and booted it without external credentials, verifying non-root startup and `/api/health` and `/api/ready` using in-memory demo data. This proves image build and boot only; it cannot validate MongoDB or Appwrite production wiring.
 
 For the browser, create `apps/web/.env.production` with only `VITE_*` public values. Use `VITE_DEMO_MODE=false`, `VITE_API_URL=` for same-origin reverse-proxy operation, and the real Appwrite browser project settings. Then build the browser and publish `apps/web/dist/client/` as your web root with SPA history fallback to `index.html`. The extra `dist/server` and `.openai` outputs are for the alternative Sites preview hosting target; do not accidentally serve them as public static files.
 

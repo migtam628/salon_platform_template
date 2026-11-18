@@ -18,7 +18,7 @@
 | Retail stock & refunds | Timed stock holds, signed settlement, inventory movements, full admin refunds, optional restock | MongoDB replica set for transactions; test-mode refund/return policy validation |
 | Operations & security | Fail-closed production config, request IDs and structured logs, rate limits, readiness endpoint, graceful shutdown, API container, GitHub CI, offline production preflight | Deployment to actual hosting, distributed edge limits, external-service acceptance tests, monitoring alerts |
 | Integration acceptance | Optional real Stripe/Appwrite connection checks; isolated MongoDB concurrency and refund tests **verified in GitHub Actions** | Actual private staging checkout, mail delivery, browser QA, owner sign-off |
-| Release verification | Node 22/24 tests, dedicated MongoDB CI, API container build/boot smoke-test job, updated GitHub Actions runtime | Container job result pending its first CI run; actual staging rollout and rollback drill |
+| Release verification | Node 22/24 tests, dedicated MongoDB CI, API container build/boot smoke test **all verified in GitHub Actions**; updated Actions runtime and pinned Ubuntu runner | Actual staging rollout, monitoring and rollback drill |
 
 ## 1. Visual direction
 
@@ -117,7 +117,7 @@ flowchart TD
     Gate -- Yes --> Staging[Private provider and deployment acceptance]
 ```
 
-The [Phase 7 GitHub Actions run](https://github.com/migtam628/salon_platform_template/actions/runs/44315096984) verified Node 22/24 jobs and real MongoDB transaction tests. The **new** API-image job builds the production-dependency image and checks startup, HTTP health, readiness, and non-root execution in a disposable CI container. That demo-mode smoke check **does not** verify a production database, external identity provider, or payment integration. The offline `preflight` command checks production configuration without connecting to any provider or printing credentials.
+The [Phase 8 GitHub Actions run](https://github.com/migtam628/salon_platform_template/actions/runs/44317396855) **successfully verified all four CI jobs**: Node 22 and 24 builds/tests, real MongoDB replica-set transactions, and the API container build/startup check. The API-image job checks HTTP health, readiness, and non-root execution in a disposable CI container. That demo-mode smoke check **does not** verify a production database, external identity provider, or payment integration. The offline `preflight` command checks production configuration without connecting to any provider or printing credentials.
 
 **Why this structure?** The UI never calculates authoritative prices or reserves appointments on its own. The API checks permissions, availability, and payment amounts; MongoDB stores durable operational records. Stripe collects card payments on hosted Checkout pages, keeping card data out of the salon app.
 
@@ -395,7 +395,7 @@ The frontend dev server proxies `/api` and WebSocket requests to the API. Withou
 
 ### Production path
 
-The project now includes a **non-root Node API container** (`apps/api/Dockerfile`), a GitHub Actions test/build workflow with a new container smoke job, an offline production configuration preflight, and an [illustrated production deployment runbook](docs/production-deployment.md) with an HTTPS reverse-proxy example, health monitoring, provider test matrix and recovery procedures. These are starting points for a real hosting environment; the API image job awaits its first CI result, and a live production deployment is **not** verified.
+The project now includes a **non-root Node API container** (`apps/api/Dockerfile`), a GitHub Actions test/build workflow with a verified container smoke job, an offline production configuration preflight, and an [illustrated production deployment runbook](docs/production-deployment.md) with an HTTPS reverse-proxy example, health monitoring, provider test matrix and recovery procedures. The CI container build and boot are **verified**; a live production deployment is **not**.
 
 ### Run tests
 
