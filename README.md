@@ -3,7 +3,7 @@
 **A custom beauty, hair, and nail salon platform with a public storefront, customer accounts, appointment scheduling, an admin operations portal, real-time chat, and Stripe payments.**
 
 > [!IMPORTANT]
-> **Phase 7 integration acceptance harness — not production-ready.** “Atelier Beauty,” its photos, product names, services, stylists, pricing, and editorial copy are demonstration content. The real salon must supply its brand, policies, personnel, and payment configuration before launch. This project is **independent of Shopify**.
+> **Phase 8 release verification — not production-ready.** “Atelier Beauty,” its photos, product names, services, stylists, pricing, and editorial copy are demonstration content. The real salon must supply its brand, policies, personnel, and payment configuration before launch. This project is **independent of Shopify**.
 
 | Experience | Implemented | Needs configuration / additional work |
 | --- | --- | --- |
@@ -16,8 +16,9 @@
 | Notifications | Persistent outbox, updates and 24-hour reminders | Verified email sender and Resend API key |
 | Stripe service deposits | Configurable percentage, hosted checkout, signed webhook | Default **OFF**; salon policy and real test-mode verification |
 | Retail stock & refunds | Timed stock holds, signed settlement, inventory movements, full admin refunds, optional restock | MongoDB replica set for transactions; test-mode refund/return policy validation |
-| Operations & security | Fail-closed production config, request IDs and structured logs, rate limits, readiness endpoint, graceful shutdown, API container, GitHub CI | Deployment to actual hosting, distributed edge limits, external-service acceptance tests, monitoring alerts |
-| Integration acceptance | Optional real Stripe/Appwrite connection checks; isolated MongoDB concurrency and refund tests with dedicated CI job | Actual private staging checkout, mail delivery, browser QA, owner sign-off |
+| Operations & security | Fail-closed production config, request IDs and structured logs, rate limits, readiness endpoint, graceful shutdown, API container, GitHub CI, offline production preflight | Deployment to actual hosting, distributed edge limits, external-service acceptance tests, monitoring alerts |
+| Integration acceptance | Optional real Stripe/Appwrite connection checks; isolated MongoDB concurrency and refund tests **verified in GitHub Actions** | Actual private staging checkout, mail delivery, browser QA, owner sign-off |
+| Release verification | Node 22/24 tests, dedicated MongoDB CI, API container build/boot smoke-test job, updated GitHub Actions runtime | Container job result pending its first CI run; actual staging rollout and rollback drill |
 
 ## 1. Visual direction
 
@@ -100,6 +101,24 @@ The reverse proxy and database are **external deployment requirements**, not bun
 
 Phase 7 introduces a separate [provider integration acceptance guide](docs/integration-acceptance.md) showing the exact test topology, safe opt-in credentials, MongoDB concurrency checks, Stripe test-mode acceptance sequence, and evidence checklist.
 
+### Phase 8 delivery gates
+
+```mermaid
+flowchart TD
+    Code[Push or pull request] --> Node[Node 22 and 24 tests and web build]
+    Code --> Mongo[Isolated MongoDB replica-set acceptance]
+    Code --> Image[Build API container]
+    Image --> Boot[Run non-root API demo smoke test]
+    Boot --> Health[Check health and database readiness]
+    Node --> Gate{All CI jobs green?}
+    Mongo --> Gate
+    Health --> Gate
+    Gate -- No --> Fix[Fix and rerun before release]
+    Gate -- Yes --> Staging[Private provider and deployment acceptance]
+```
+
+The [Phase 7 GitHub Actions run](https://github.com/migtam628/salon_platform_template/actions/runs/44315096984) verified Node 22/24 jobs and real MongoDB transaction tests. The **new** API-image job builds the production-dependency image and checks startup, HTTP health, readiness, and non-root execution in a disposable CI container. That demo-mode smoke check **does not** verify a production database, external identity provider, or payment integration. The offline `preflight` command checks production configuration without connecting to any provider or printing credentials.
+
 **Why this structure?** The UI never calculates authoritative prices or reserves appointments on its own. The API checks permissions, availability, and payment amounts; MongoDB stores durable operational records. Stripe collects card payments on hosted Checkout pages, keeping card data out of the salon app.
 
 | Layer | Technology | Responsibility |
@@ -147,7 +166,8 @@ salon_platform_template/
 │   ├── admin-concept.webp         # Admin concept
 │   ├── production-deployment.md   # Deployment and release runbook
 │   └── integration-acceptance.md  # Provider tests, diagrams and evidence sheet
-├── .github/workflows/ci.yml      # Node 22/24, web, and MongoDB integration CI
+├── .github/workflows/ci.yml      # Node 22/24, MongoDB, and API image smoke CI
+├── .github/scripts/             # Disposable CI MongoDB and API smoke fixtures
 ├── .dockerignore                 # Prevent secrets and test files entering image
 ├── .env.example                   # Configuration template (no secrets)
 └── README.md
@@ -375,7 +395,7 @@ The frontend dev server proxies `/api` and WebSocket requests to the API. Withou
 
 ### Production path
 
-The project now includes a **non-root Node API container** (`apps/api/Dockerfile`), a GitHub Actions test/build workflow, and an [illustrated production deployment runbook](docs/production-deployment.md) with an HTTPS reverse-proxy example, health monitoring, provider test matrix and recovery procedures. These are starting points for a real hosting environment; the container and live Stripe/Appwrite/MongoDB flows have **not** been deployed or verified here.
+The project now includes a **non-root Node API container** (`apps/api/Dockerfile`), a GitHub Actions test/build workflow with a new container smoke job, an offline production configuration preflight, and an [illustrated production deployment runbook](docs/production-deployment.md) with an HTTPS reverse-proxy example, health monitoring, provider test matrix and recovery procedures. These are starting points for a real hosting environment; the API image job awaits its first CI result, and a live production deployment is **not** verified.
 
 ### Run tests
 
@@ -385,6 +405,28 @@ npm run build
 ```
 
 The test suite checks API authorization, booking conflicts, staff scheduling, rescheduling/cancellation, Stripe configuration safeguards, deposit calculations and checkout state, retail stock holds, exact signed Stripe settlement, expiry cleanup, account-scoped order history, refund authorization/idempotency, one-time restocking, notification behavior, production configuration guardrails, readiness behavior, origin allowlists, API throttling, frontend compilation, and the static-hosting worker. GitHub CI runs the suite under Node 22 and 24. Mocked provider tests do **not** replace a live Stripe test-mode transaction, a MongoDB replica-set integration test, or manual browser QA.
+
+### Offline production preflight (Phase 8)
+
+After privately configuring `apps/api/.env` (or injecting environment variables through a protected deployment workflow), run:
+
+```bash
+npm run preflight -w @salon/api
+```
+
+The preflight checks the **production** rules even if your terminal currently uses `NODE_ENV=development`: a persistent MongoDB URI, secure Appwrite endpoint and project, trusted admin ID allowlist, HTTPS origins, disabled demo identities, matching Stripe keys, optional email sender pairing, acceptable proxy trust count, and sensible booking deposit settings. It **does not** print addresses, admin IDs, database strings, or secrets. A failed check exits nonzero; a pass means the config is structurally safe, not that external services work. This command never creates a customer or changes a payment.
+
+```mermaid
+flowchart TD
+    Input[Private production environment] --> Check[Offline preflight]
+    Check --> Valid{Valid config?}
+    Valid -- No --> Repair[Correct settings locally]
+    Valid -- Yes --> Verify[Staging provider acceptance]
+    Verify --> Ops[Backup, rollback and owner sign-off]
+    Ops --> Launch[Candidate for production release]
+```
+
+Do **not** place production secrets in a public GitHub Actions workflow log. The standard CI jobs intentionally use ephemeral demo/test resources only. See [deployment runbook §3](docs/production-deployment.md) for the actual release gate.
 
 ### Provider and database integration acceptance
 

@@ -49,6 +49,26 @@ ACCESS_LOGS=true
 
 The values above are examples, not real endpoints. Never put secrets in `VITE_*` or commit a real `.env`. Production startup refuses missing persistent identity/database config, a demo role, missing admin allowlist, malformed origins, non-HTTPS client URL, and one-sided Stripe secrets. Configure `TRUST_PROXY_HOPS=1` **only** if there is exactly one trusted hop and users cannot reach Express directly. Otherwise leave it `0`; forged forwarding headers must not control IP-based rate limits.
 
+#### Phase 8 offline preflight
+
+With your private production environment injected into the API workspace, run:
+
+```bash
+npm run preflight -w @salon/api
+```
+
+The preflight uses production rules regardless of the current `NODE_ENV`, reports only generic configuration errors and capability notices, and exits nonzero on failure. It checks URI shape, HTTPS and admin identity requirements, reverse-proxy trust count, optional Stripe secret pairing, booking-deposit percentage, and optional Resend sender pairing. It does **not** connect to MongoDB, Stripe, Appwrite or Resend; it never prints credential values. **Passing is necessary but not sufficient** for launch.
+
+```mermaid
+flowchart TD
+    Secrets[Private secrets and server config] --> Preflight[Offline production preflight]
+    Preflight --> Check{Passed?}
+    Check -- No --> Fix[Fix config before deployment]
+    Check -- Yes --> Tests[Private staging acceptance]
+    Tests --> Recovery[Restore and rollback drill]
+    Recovery --> Approve[Salon owner approval]
+```
+
 For Stripe test mode, set both `STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET`. For production with no retail/deposit payments, leave both unset and understand that checkout returns `503`. Appointment deposits additionally need `BOOKING_DEPOSIT_PERCENT` above `0`. Configuring secrets is not evidence that they work.
 
 ## 4. Build and run
@@ -70,7 +90,7 @@ docker run -d --name salon-api --restart unless-stopped \
   -p 127.0.0.1:4000:4000 salon-api:local
 ```
 
-The `apps/api/Dockerfile` is a build artifact; the container has no local MongoDB bundled and requires real services. Docker image build has not been verified in this development environment, where the Docker CLI is unavailable.
+The `apps/api/Dockerfile` is a build artifact; the container has no local MongoDB bundled and requires real services. Phase 8 adds an isolated GitHub Actions job that builds this image and boots it without external credentials, verifying non-root startup and `/api/health` and `/api/ready` using in-memory demo data. This proves build and boot only; it cannot validate MongoDB or Appwrite production wiring. Check the actual Actions job outcome before marking this verification complete.
 
 For the browser, create `apps/web/.env.production` with only `VITE_*` public values. Use `VITE_DEMO_MODE=false`, `VITE_API_URL=` for same-origin reverse-proxy operation, and the real Appwrite browser project settings. Then build the browser and publish `apps/web/dist/client/` as your web root with SPA history fallback to `index.html`. The extra `dist/server` and `.openai` outputs are for the alternative Sites preview hosting target; do not accidentally serve them as public static files.
 
@@ -123,7 +143,7 @@ Use HTTPS monitoring from outside the host, notify operators for repeated `503`,
 - [ ] Perform a complete backup, restore into a **separate environment**, restart the API during checkout, and practice rollback.
 - [ ] Review legal/privacy, tax, returns, payment-dispute, cancellation, and customer support policies with the salon owner.
 
-The automated suite mocks external providers. Green CI alone **never** substitutes for these checks.
+The automated API unit suite mocks external providers. The [verified Phase 7 CI run](https://github.com/migtam628/salon_platform_template/actions/runs/44315096984) independently passed real MongoDB replica-set concurrency tests; that still does not verify a private production cluster. The Phase 8 container smoke job likewise does not exercise real providers. Green CI alone **never** substitutes for these staging checks.
 
 For a concrete execution matrix, follow [Phase 7 integration acceptance](integration-acceptance.md). It adds an isolated GitHub Actions MongoDB replica-set test job and private opt-in read-only connection tests for Stripe test mode and Appwrite. Green local tests may include skipped providers; always inspect the actual CI job and staging evidence before approving launch.
 

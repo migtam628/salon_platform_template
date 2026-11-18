@@ -22,8 +22,8 @@ jobs:
       matrix:
         node: ['22', '24']
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node }}
           cache: npm
@@ -36,8 +36,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: '22'
           cache: npm
@@ -48,3 +48,13 @@ jobs:
         env:
           MONGODB_TEST_URI: mongodb://127.0.0.1:27017/?replicaSet=rs0
         run: npm run test:integration -w @salon/api
+  api-container:
+    name: Build and smoke test production API image
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build production-dependency API image
+        run: docker build -f apps/api/Dockerfile -t salon-api:ci .
+      - name: Boot container and verify liveness, readiness and non-root user
+        run: bash .github/scripts/smoke-api-container.sh
