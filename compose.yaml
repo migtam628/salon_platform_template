@@ -1,0 +1,62 @@
+name: salon-${SALON_DEPLOY_MODE:-local}
+
+services:
+  api:
+    image: salon-platform-api:${SALON_DEPLOY_MODE:-local}
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    env_file:
+      - .deploy/${SALON_DEPLOY_MODE:-local}-api.env
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    expose:
+      - '4000'
+    healthcheck:
+      test: ['CMD', 'node', '-e', 'fetch("http://127.0.0.1:4000/api/ready").then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))']
+      interval: 15s
+      timeout: 5s
+      start_period: 45s
+      retries: 5
+    networks:
+      - backend
+
+  web:
+    image: salon-platform-web:${SALON_DEPLOY_MODE:-local}
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      args:
+        VITE_DEMO_MODE: ${VITE_DEMO_MODE:-true}
+        VITE_API_URL: ''
+        VITE_APPWRITE_ENDPOINT: ${VITE_APPWRITE_ENDPOINT:-}
+        VITE_APPWRITE_PROJECT_ID: ${VITE_APPWRITE_PROJECT_ID:-}
+    environment:
+      SITE_ADDRESS: ${SALON_SITE_ADDRESS:-:80}
+    ports:
+      - '${SALON_HTTP_BIND:-127.0.0.1}:${SALON_HTTP_PORT:-8080}:80'
+      - '${SALON_HTTPS_BIND:-127.0.0.1}:${SALON_HTTPS_PORT:-8443}:443'
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - backend
+
+networks:
+  backend:
+
+volumes:
+  caddy_data:
+  caddy_config:

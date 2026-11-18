@@ -16,9 +16,12 @@
 | Notifications | Persistent outbox, updates and 24-hour reminders | Verified email sender and Resend API key |
 | Stripe service deposits | Configurable percentage, hosted checkout, signed webhook | Default **OFF**; salon policy and real test-mode verification |
 | Retail stock & refunds | Timed stock holds, signed settlement, inventory movements, full admin refunds, optional restock | MongoDB replica set for transactions; test-mode refund/return policy validation |
-| Operations & security | Fail-closed production config, request IDs and structured logs, rate limits, readiness endpoint, graceful shutdown, API container, GitHub CI, offline production preflight | Deployment to actual hosting, distributed edge limits, external-service acceptance tests, monitoring alerts |
+| Operations & security | Fail-closed production config, request IDs and structured logs, rate limits, readiness endpoint, graceful shutdown, Docker Compose installer, GitHub CI, offline production preflight | Deployment to actual hosting, distributed edge limits, external-service acceptance tests, monitoring alerts |
 | Integration acceptance | Optional real Stripe/Appwrite connection checks; isolated MongoDB concurrency and refund tests **verified in GitHub Actions** | Actual private staging checkout, mail delivery, browser QA, owner sign-off |
 | Release verification | Node 22/24 tests, dedicated MongoDB CI, API container build/boot smoke test **all verified in GitHub Actions**; updated Actions runtime and pinned Ubuntu runner | Actual staging rollout, monitoring and rollback drill |
+
+> [!NOTE]
+> **Phase 9: reproducible Docker installation added.** The single-container API smoke test above is already verified. A new CI job now exercises the **full local stack** (MongoDB + API + Caddy frontend); check its latest GitHub Actions result before treating the new Compose path as verified.
 
 ## 1. Visual direction
 
@@ -168,6 +171,16 @@ salon_platform_template/
 │   └── integration-acceptance.md  # Provider tests, diagrams and evidence sheet
 ├── .github/workflows/ci.yml      # Node 22/24, MongoDB, and API image smoke CI
 ├── .github/scripts/             # Disposable CI MongoDB and API smoke fixtures
+├── compose.yaml                  # API + built frontend/Caddy, common modes
+├── compose.local.yaml            # Local-only MongoDB replica-set override
+├── deploy/
+│   ├── Caddyfile                # SPA + API + WebSocket same-origin routing
+│   ├── mongo-replica-init.sh    # Idempotent local replica-set initiation
+│   └── templates/               # Safe local and staging configuration examples
+├── scripts/
+│   ├── install.sh               # One-command local or staged deployment
+│   ├── install-docker-ubuntu.sh # Optional official Ubuntu/Debian Docker setup
+│   └── stack.sh                 # Status, logs, restart and non-destructive stop
 ├── .dockerignore                 # Prevent secrets and test files entering image
 ├── .env.example                   # Configuration template (no secrets)
 └── README.md
@@ -377,6 +390,39 @@ Delivery is disabled unless **both** `RESEND_API_KEY` and a verified `SALON_EMAI
 
 ## 9. Run locally
 
+### Recommended: install the full Docker stack
+
+On Ubuntu or Debian, from the cloned repository root:
+
+```bash
+bash scripts/install.sh local --install-docker
+```
+
+This checks or (with your explicit `--install-docker` permission) installs Docker Engine and the Compose plugin using Docker's official package repository. It then builds the **API image and compiled storefront image**, starts Caddy and a persistent **single-node MongoDB replica set**, and checks the API. No host-level Node.js or npm installation is required.
+
+Open **http://localhost:8080** on that same computer. The preview binds to `127.0.0.1` only, uses demo identities, and must **never** be exposed to customers or the public internet.
+
+```mermaid
+flowchart TD
+    Browser[Local browser at localhost:8080] --> Caddy[Caddy container: compiled React]
+    Caddy -->|/api and /socket.io| API[Non-root Node API container]
+    API --> Mongo[(MongoDB 7 single-node replica set)]
+    Mongo --> Volume[(Named persistent Docker volume)]
+```
+
+After installation:
+
+```bash
+bash scripts/stack.sh local status
+bash scripts/stack.sh local logs
+bash scripts/stack.sh local restart
+bash scripts/stack.sh local stop
+```
+
+The `stop` action leaves database and Caddy volumes intact. Re-running the installer preserves existing `.deploy/` settings and named volumes. It never wipes data or resets a database. See the [illustrated container installation guide](docs/container-deployment.md) for a staging HTTPS setup, secrets, DNS, upgrade safety, recovery, and failure handling.
+
+### Alternative: host Node.js development mode
+
 Prerequisites: **Node.js 22+**, npm, and optionally MongoDB for persistent development data. Retail checkout against MongoDB requires a transaction-capable replica set or managed cluster.
 
 ```bash
@@ -395,7 +441,7 @@ The frontend dev server proxies `/api` and WebSocket requests to the API. Withou
 
 ### Production path
 
-The project now includes a **non-root Node API container** (`apps/api/Dockerfile`), a GitHub Actions test/build workflow with a verified container smoke job, an offline production configuration preflight, and an [illustrated production deployment runbook](docs/production-deployment.md) with an HTTPS reverse-proxy example, health monitoring, provider test matrix and recovery procedures. The CI container build and boot are **verified**; a live production deployment is **not**.
+The project includes a **non-root Node API container** (`apps/api/Dockerfile`), a built React/Caddy container (`apps/web/Dockerfile`), separate local/staging Compose configuration, a GitHub Actions test/build workflow, an offline production preflight, and an [illustrated production deployment runbook](docs/production-deployment.md). API image CI acceptance is verified. The full-stack Compose job is newly added and must pass before its installation path is marked verified; real production hosting is **not** verified.
 
 ### Run tests
 

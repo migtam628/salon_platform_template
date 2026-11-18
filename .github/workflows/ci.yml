@@ -58,3 +58,24 @@ jobs:
         run: docker build -f apps/api/Dockerfile -t salon-api:ci .
       - name: Boot container and verify liveness, readiness and non-root user
         run: bash .github/scripts/smoke-api-container.sh
+  compose-local:
+    name: Install and smoke test complete local Docker stack
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check bootstrap script syntax
+        run: bash -n scripts/install.sh scripts/install-docker-ubuntu.sh scripts/stack.sh deploy/mongo-replica-init.sh
+      - name: Build and start API, Mongo replica set and Caddy web app
+        run: bash scripts/install.sh local
+      - name: Smoke check the proxied frontend, public API and real Mongo readiness
+        run: |
+          curl --fail --silent --show-error http://127.0.0.1:8080/ | grep -q '<div id="root">'
+          curl --fail --silent --show-error http://127.0.0.1:8080/api/health | grep -q '"ok":true'
+          curl --fail --silent --show-error http://127.0.0.1:8080/api/ready | grep -q '"ok":true'
+      - name: Report startup logs on failure
+        if: failure()
+        run: docker compose --env-file .deploy/local-stack.env -f compose.yaml -f compose.local.yaml logs --tail=100
+      - name: Stop CI containers and preserve ephemeral test volumes
+        if: always()
+        run: docker compose --env-file .deploy/local-stack.env -f compose.yaml -f compose.local.yaml down

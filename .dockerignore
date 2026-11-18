@@ -8,12 +8,10 @@ node_modules
 **/.env.*
 .env
 .env.*
+.deploy
+**/.deploy
 !.env.example
 docs
-apps/web/src
-apps/web/public
-apps/web/worker
-apps/web/scripts
 apps/web/tests
 apps/api/tests
 **/*.log

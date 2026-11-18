@@ -1,0 +1,36 @@
+# The disposable single-node replica set is for local development only.
+# Staging/production use compose.yaml WITHOUT this override and a managed DB.
+services:
+  mongo:
+    image: mongo:7
+    command: ['mongod', '--replSet', 'rs0', '--bind_ip_all']
+    restart: unless-stopped
+    volumes:
+      - local_mongo_data:/data/db
+    healthcheck:
+      test: ['CMD', 'mongosh', '--quiet', '--eval', 'db.adminCommand({ping:1}).ok ? quit(0) : quit(1)']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks:
+      - backend
+
+  mongo-init:
+    image: mongo:7
+    depends_on:
+      mongo:
+        condition: service_healthy
+    volumes:
+      - ./deploy/mongo-replica-init.sh:/init-replica-set.sh:ro
+    entrypoint: ['bash', '/init-replica-set.sh']
+    restart: 'no'
+    networks:
+      - backend
+
+  api:
+    depends_on:
+      mongo-init:
+        condition: service_completed_successfully
+
+volumes:
+  local_mongo_data:
