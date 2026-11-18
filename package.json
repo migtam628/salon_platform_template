@@ -9,7 +9,8 @@
     "dev:web": "npm run dev -w web",
     "dev:api": "npm run dev -w @salon/api",
     "build": "npm run build -w web",
-    "test": "npm run test -w @salon/api && npm run build -w web && npm run test:sites -w web"
+    "test": "npm run test -w @salon/api && npm run build -w web && npm run test:sites -w web",
+    "test:integration": "npm run test:integration -w @salon/api"
   },
   "devDependencies": {"concurrently": "^9.2.1"},
   "overrides": { "rollup": "4.48.1" }

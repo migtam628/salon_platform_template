@@ -31,3 +31,20 @@ jobs:
         run: npm ci
       - name: Run API security, booking, retail, and notification tests; build and check web
         run: npm test
+  mongo-integration:
+    name: MongoDB replica-set transaction acceptance
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: Start isolated single-node MongoDB replica set
+        run: bash .github/scripts/start-test-mongo.sh
+      - name: Run real MongoDB transaction and booking conflict tests
+        env:
+          MONGODB_TEST_URI: mongodb://127.0.0.1:27017/?replicaSet=rs0
+        run: npm run test:integration -w @salon/api

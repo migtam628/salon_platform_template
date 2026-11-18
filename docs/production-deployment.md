@@ -125,6 +125,8 @@ Use HTTPS monitoring from outside the host, notify operators for repeated `503`,
 
 The automated suite mocks external providers. Green CI alone **never** substitutes for these checks.
 
+For a concrete execution matrix, follow [Phase 7 integration acceptance](integration-acceptance.md). It adds an isolated GitHub Actions MongoDB replica-set test job and private opt-in read-only connection tests for Stripe test mode and Appwrite. Green local tests may include skipped providers; always inspect the actual CI job and staging evidence before approving launch.
+
 ## 7. Failure recovery
 
 1. For `503 /api/ready`, inspect database reachability and driver errors, then verify the MongoDB replica set. Do not retry Stripe Checkout blindly if a reservation may still exist.

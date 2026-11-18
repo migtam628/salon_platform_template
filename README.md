@@ -3,7 +3,7 @@
 **A custom beauty, hair, and nail salon platform with a public storefront, customer accounts, appointment scheduling, an admin operations portal, real-time chat, and Stripe payments.**
 
 > [!IMPORTANT]
-> **Phase 6 security/deployment foundation — not production-ready.** “Atelier Beauty,” its photos, product names, services, stylists, pricing, and editorial copy are demonstration content. The real salon must supply its brand, policies, personnel, and payment configuration before launch. This project is **independent of Shopify**.
+> **Phase 7 integration acceptance harness — not production-ready.** “Atelier Beauty,” its photos, product names, services, stylists, pricing, and editorial copy are demonstration content. The real salon must supply its brand, policies, personnel, and payment configuration before launch. This project is **independent of Shopify**.
 
 | Experience | Implemented | Needs configuration / additional work |
 | --- | --- | --- |
@@ -17,6 +17,7 @@
 | Stripe service deposits | Configurable percentage, hosted checkout, signed webhook | Default **OFF**; salon policy and real test-mode verification |
 | Retail stock & refunds | Timed stock holds, signed settlement, inventory movements, full admin refunds, optional restock | MongoDB replica set for transactions; test-mode refund/return policy validation |
 | Operations & security | Fail-closed production config, request IDs and structured logs, rate limits, readiness endpoint, graceful shutdown, API container, GitHub CI | Deployment to actual hosting, distributed edge limits, external-service acceptance tests, monitoring alerts |
+| Integration acceptance | Optional real Stripe/Appwrite connection checks; isolated MongoDB concurrency and refund tests with dedicated CI job | Actual private staging checkout, mail delivery, browser QA, owner sign-off |
 
 ## 1. Visual direction
 
@@ -97,6 +98,8 @@ flowchart TD
 
 The reverse proxy and database are **external deployment requirements**, not bundled local services. The in-process limiter adds a safety layer, but a multi-replica system also needs coordinated gateway-level protection. See the [production deployment runbook](docs/production-deployment.md) for config, network layout, failure recovery, and a real-service acceptance checklist.
 
+Phase 7 introduces a separate [provider integration acceptance guide](docs/integration-acceptance.md) showing the exact test topology, safe opt-in credentials, MongoDB concurrency checks, Stripe test-mode acceptance sequence, and evidence checklist.
+
 **Why this structure?** The UI never calculates authoritative prices or reserves appointments on its own. The API checks permissions, availability, and payment amounts; MongoDB stores durable operational records. Stripe collects card payments on hosted Checkout pages, keeping card data out of the salon app.
 
 | Layer | Technology | Responsibility |
@@ -125,7 +128,7 @@ salon_platform_template/
 │   │   │   ├── notifications.js   # Email outbox and delivery worker
 │   │   │   ├── security.js        # Origin, config, request ID, throttling, logging
 │   │   │   └── seed.js            # Development-only salon data
-│   │   └── tests/                # API, booking, payment and email tests
+│   │   └── tests/                # API, booking, payment, email, and opt-in integrations
 │   └── web/
 │       ├── src/
 │       │   ├── App.jsx            # App composition and navigation
@@ -142,8 +145,9 @@ salon_platform_template/
 ├── docs/
 │   ├── approved-concept.webp      # Approved storefront concept
 │   ├── admin-concept.webp         # Admin concept
-│   └── production-deployment.md   # Deployment and release runbook
-├── .github/workflows/ci.yml      # Node 22/24 tests and web build
+│   ├── production-deployment.md   # Deployment and release runbook
+│   └── integration-acceptance.md  # Provider tests, diagrams and evidence sheet
+├── .github/workflows/ci.yml      # Node 22/24, web, and MongoDB integration CI
 ├── .dockerignore                 # Prevent secrets and test files entering image
 ├── .env.example                   # Configuration template (no secrets)
 └── README.md
@@ -382,6 +386,14 @@ npm run build
 
 The test suite checks API authorization, booking conflicts, staff scheduling, rescheduling/cancellation, Stripe configuration safeguards, deposit calculations and checkout state, retail stock holds, exact signed Stripe settlement, expiry cleanup, account-scoped order history, refund authorization/idempotency, one-time restocking, notification behavior, production configuration guardrails, readiness behavior, origin allowlists, API throttling, frontend compilation, and the static-hosting worker. GitHub CI runs the suite under Node 22 and 24. Mocked provider tests do **not** replace a live Stripe test-mode transaction, a MongoDB replica-set integration test, or manual browser QA.
 
+### Provider and database integration acceptance
+
+```bash
+npm run test:integration
+```
+
+Without explicit environment variables, provider tests report **SKIP** (not passed). The CI `mongo-integration` job boots an isolated single-node replica set and runs transactional stock, refund, expiry, and overlapping-booking checks. A protected local test environment can opt into read-only Stripe test-mode and Appwrite test-account verification. See [Phase 7 integration acceptance](docs/integration-acceptance.md) for exact variables, manual hosted Checkout tests, and the outstanding evidence matrix. **Never point the disposable-database test at a production cluster.**
+
 ## 10. Environment configuration
 
 All supported entries are in [`.env.example`](.env.example). Never commit `.env`, live credentials, or Stripe secrets to source control.
@@ -501,6 +513,8 @@ Use this checklist before giving the site to real paying customers:
 - [x] Implement inventory holds/settlement, pickup tracking, account-linked orders, and admin full-refund foundation (mocked API tests).
 - [ ] Configure real pickup address/contact/policies, taxes, compliant receipts, shipping if offered, and partial-refund/return process.
 - [ ] Test production MongoDB transactions and live Stripe **test-mode** checkout/expiration/refund webhook timing, including failed and delayed events.
+- [x] Add isolated MongoDB replica-set integration tests and a CI job to run them; add opt-in read-only real Stripe/Appwrite connection checks.
+- [ ] Review successful GitHub MongoDB CI results and complete the real staging-provider payment, identity, email, and browser acceptance matrix.
 - [x] Add per-process rate limiting, request tracing, structured logs, database readiness checks and container/CI foundation.
 - [ ] Add shared distributed edge rate limits, durable business audit trail, alerting integrations, tested backups and restore drills.
 - [ ] Run API tests, production build, hosting tests, mobile/desktop browser QA, accessibility checks, and transactional end-to-end tests.
@@ -517,6 +531,7 @@ Use this checklist before giving the site to real paying customers:
 | 4 | Staff breaks/holidays/special dates and configurable appointment deposit collection | Implemented preview |
 | 5 | Retail pickup desk, transactional stock reservations, customer order history, full refunds | Implemented preview |
 | 6 | Security guards, readiness, logs, abuse throttling, Docker/CI and deployment runbook | Foundation implemented; external provider tests and deployment outstanding |
+| 7 | MongoDB replica-set CI integration, optional Stripe/Appwrite smoke tests, real-provider acceptance guide | Harness implemented; real provider credentials, live test flows and CI confirmation outstanding |
 
 ### Important limitations
 
